@@ -1,5 +1,5 @@
 use self::ffi::*;
-use std::convert::{From, Into, TryInto};
+use std::convert::{From, TryFrom, TryInto};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static BSEC_IN_USE: AtomicBool = AtomicBool::new(false);
@@ -24,12 +24,15 @@ impl Bsec {
 
     fn update_subscription(
         &mut self,
-        requested_outputs: &Vec<SensorConfiguration>,
-    ) -> Result<(), Error> {
+        requested_outputs: &Vec<RequestedSensorConfiguration>,
+    ) -> Result<Vec<RequiredSensorSettings>, Error> {
         let requested_outputs: Vec<bsec_sensor_configuration_t> =
-            requested_outputs.iter().map(Into::into).collect();
-        let mut required_sensor_settings: [bsec_sensor_configuration_t; 0] = [];
-        let mut n_required_sensor_settings = 0;
+            requested_outputs.iter().map(From::from).collect();
+        let mut required_sensor_settings = [bsec_sensor_configuration_t {
+            sample_rate: 0.,
+            sensor_id: 0,
+        }; NUM_PHYSICAL_SENSORS as usize];
+        let mut n_required_sensor_settings = NUM_PHYSICAL_SENSORS;
         unsafe {
             bsec_update_subscription(
                 requested_outputs.as_ptr(),
@@ -42,7 +45,11 @@ impl Bsec {
             )
             .into_result()?
         }
-        Ok(())
+        required_sensor_settings
+            .iter()
+            .take(n_required_sensor_settings as usize)
+            .map(RequiredSensorSettings::try_from)
+            .collect()
     }
 }
 
@@ -52,17 +59,34 @@ impl Drop for Bsec {
     }
 }
 
-pub struct SensorConfiguration {
+#[derive(Clone, Copy, Debug)]
+pub struct RequestedSensorConfiguration {
     sample_rate: SampleRate,
     sensor: VirtualSensorOutput,
 }
 
-impl From<&SensorConfiguration> for bsec_sensor_configuration_t {
-    fn from(sensor_configuration: &SensorConfiguration) -> Self {
-        bsec_sensor_configuration_t {
+impl From<&RequestedSensorConfiguration> for bsec_sensor_configuration_t {
+    fn from(sensor_configuration: &RequestedSensorConfiguration) -> Self {
+        Self {
             sample_rate: sensor_configuration.sample_rate.into(),
             sensor_id: sensor_configuration.sensor.into(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RequiredSensorSettings {
+    sample_rate: SampleRate,
+    sensor: PhysicalSensorInput,
+}
+
+impl TryFrom<&bsec_sensor_configuration_t> for RequiredSensorSettings {
+    type Error = Error;
+    fn try_from(sensor_configuration: &bsec_sensor_configuration_t) -> Result<Self, Error> {
+        Ok(Self {
+            sample_rate: SampleRate::try_from(sensor_configuration.sample_rate)?,
+            sensor: PhysicalSensorInput::try_from(sensor_configuration.sensor_id)?,
+        })
     }
 }
 
@@ -73,6 +97,28 @@ pub enum SampleRate {
     Continuous,
     Lp,
     UlpMeasurementOnDemand,
+}
+
+impl TryFrom<f32> for SampleRate {
+    type Error = Error;
+    fn try_from(sample_rate: f32) -> Result<Self, Error> {
+        Self::try_from(sample_rate as f64)
+    }
+}
+
+impl TryFrom<f64> for SampleRate {
+    type Error = Error;
+    fn try_from(sample_rate: f64) -> Result<Self, Error> {
+        use SampleRate::*;
+        match sample_rate {
+            sr if sr == BSEC_SAMPLE_RATE_DISABLED => Ok(Disabled),
+            sr if sr == BSEC_SAMPLE_RATE_ULP => Ok(Ulp),
+            sr if sr == BSEC_SAMPLE_RATE_CONTINUOUS => Ok(Continuous),
+            sr if sr == BSEC_SAMPLE_RATE_LP => Ok(Lp),
+            sr if sr == BSEC_SAMPLE_RATE_ULP_MEASUREMENT_ON_DEMAND => Ok(UlpMeasurementOnDemand),
+            sample_rate => Err(Error::InvalidSampleRate(sample_rate)),
+        }
+    }
 }
 
 impl From<SampleRate> for f32 {
@@ -90,6 +136,44 @@ impl From<SampleRate> for f64 {
             Continuous => BSEC_SAMPLE_RATE_CONTINUOUS,
             Lp => BSEC_SAMPLE_RATE_LP,
             UlpMeasurementOnDemand => BSEC_SAMPLE_RATE_ULP_MEASUREMENT_ON_DEMAND,
+        }
+    }
+}
+
+pub const NUM_PHYSICAL_SENSORS: u8 = 6;
+
+#[derive(Clone, Copy, Debug)]
+pub enum PhysicalSensorInput {
+    Pressure,
+    Humidity,
+    Temperature,
+    GasResistor,
+    HeatSource,
+    DisableBaselineTracker,
+}
+
+impl TryFrom<u8> for PhysicalSensorInput {
+    type Error = Error;
+    fn try_from(physical_sensor: u8) -> Result<Self, Error> {
+        Self::try_from(physical_sensor as u32)
+    }
+}
+
+impl TryFrom<u32> for PhysicalSensorInput {
+    type Error = Error;
+    fn try_from(physical_sensor: u32) -> Result<Self, Error> {
+        #![allow(non_upper_case_globals)]
+        use PhysicalSensorInput::*;
+        match physical_sensor {
+            bsec_physical_sensor_t_BSEC_INPUT_PRESSURE => Ok(Pressure),
+            bsec_physical_sensor_t_BSEC_INPUT_HUMIDITY => Ok(Humidity),
+            bsec_physical_sensor_t_BSEC_INPUT_TEMPERATURE => Ok(Temperature),
+            bsec_physical_sensor_t_BSEC_INPUT_GASRESISTOR => Ok(GasResistor),
+            bsec_physical_sensor_t_BSEC_INPUT_HEATSOURCE => Ok(HeatSource),
+            bsec_physical_sensor_t_BSEC_INPUT_DISABLE_BASELINE_TRACKER => {
+                Ok(DisableBaselineTracker)
+            }
+            physical_sensor => Err(Error::InvalidPhysicalSensorId(physical_sensor)),
         }
     }
 }
@@ -149,6 +233,8 @@ pub enum Error {
     ArgumentListTooLong,
     BsecAlreadyInUse,
     BsecError(BsecError),
+    InvalidSampleRate(f64),
+    InvalidPhysicalSensorId(u32),
 }
 
 impl From<BsecError> for Error {
