@@ -1,5 +1,5 @@
 use self::ffi::*;
-use std::convert::From;
+use std::convert::{From, Into, TryInto};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static BSEC_IN_USE: AtomicBool = AtomicBool::new(false);
@@ -21,6 +21,29 @@ impl Bsec {
             Err(Error::BsecAlreadyInUse)
         }
     }
+
+    fn update_subscription(
+        &mut self,
+        requested_outputs: &Vec<SensorConfiguration>,
+    ) -> Result<(), Error> {
+        let requested_outputs: Vec<bsec_sensor_configuration_t> =
+            requested_outputs.iter().map(Into::into).collect();
+        let mut required_sensor_settings: [bsec_sensor_configuration_t; 0] = [];
+        let mut n_required_sensor_settings = 0;
+        unsafe {
+            bsec_update_subscription(
+                requested_outputs.as_ptr(),
+                requested_outputs
+                    .len()
+                    .try_into()
+                    .or(Err(Error::ArgumentListTooLong))?,
+                required_sensor_settings.as_mut_ptr(),
+                &mut n_required_sensor_settings,
+            )
+            .into_result()?
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Bsec {
@@ -29,8 +52,101 @@ impl Drop for Bsec {
     }
 }
 
-#[derive(Debug)]
+pub struct SensorConfiguration {
+    sample_rate: SampleRate,
+    sensor: VirtualSensorOutput,
+}
+
+impl From<&SensorConfiguration> for bsec_sensor_configuration_t {
+    fn from(sensor_configuration: &SensorConfiguration) -> Self {
+        bsec_sensor_configuration_t {
+            sample_rate: sensor_configuration.sample_rate.into(),
+            sensor_id: sensor_configuration.sensor.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SampleRate {
+    Disabled,
+    Ulp,
+    Continuous,
+    Lp,
+    UlpMeasurementOnDemand,
+}
+
+impl From<SampleRate> for f32 {
+    fn from(sample_rate: SampleRate) -> Self {
+        f64::from(sample_rate) as f32
+    }
+}
+
+impl From<SampleRate> for f64 {
+    fn from(sample_rate: SampleRate) -> Self {
+        use SampleRate::*;
+        match sample_rate {
+            Disabled => BSEC_SAMPLE_RATE_DISABLED,
+            Ulp => BSEC_SAMPLE_RATE_ULP,
+            Continuous => BSEC_SAMPLE_RATE_CONTINUOUS,
+            Lp => BSEC_SAMPLE_RATE_LP,
+            UlpMeasurementOnDemand => BSEC_SAMPLE_RATE_ULP_MEASUREMENT_ON_DEMAND,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum VirtualSensorOutput {
+    Iaq,
+    StaticIaq,
+    Co2Equivalent,
+    BreathVocEquivalent,
+    RawTemperature,
+    RawPressure,
+    RawHumidity,
+    RawGas,
+    StabilizationStatus,
+    RunInStatus,
+    SensorHeatCompensatedTemperature,
+    SensorHeatCompensatedHumidity,
+    DebugCompensatedGas,
+    GasPercentage,
+}
+
+impl From<VirtualSensorOutput> for bsec_virtual_sensor_t {
+    fn from(virtual_sensor: VirtualSensorOutput) -> Self {
+        use VirtualSensorOutput::*;
+        match virtual_sensor {
+            Iaq => bsec_virtual_sensor_t_BSEC_OUTPUT_IAQ,
+            StaticIaq => bsec_virtual_sensor_t_BSEC_OUTPUT_STATIC_IAQ,
+            Co2Equivalent => bsec_virtual_sensor_t_BSEC_OUTPUT_CO2_EQUIVALENT,
+            BreathVocEquivalent => bsec_virtual_sensor_t_BSEC_OUTPUT_BREATH_VOC_EQUIVALENT,
+            RawTemperature => bsec_virtual_sensor_t_BSEC_OUTPUT_RAW_TEMPERATURE,
+            RawPressure => bsec_virtual_sensor_t_BSEC_OUTPUT_RAW_PRESSURE,
+            RawHumidity => bsec_virtual_sensor_t_BSEC_OUTPUT_RAW_HUMIDITY,
+            RawGas => bsec_virtual_sensor_t_BSEC_OUTPUT_RAW_GAS,
+            StabilizationStatus => bsec_virtual_sensor_t_BSEC_OUTPUT_STABILIZATION_STATUS,
+            RunInStatus => bsec_virtual_sensor_t_BSEC_OUTPUT_RUN_IN_STATUS,
+            SensorHeatCompensatedTemperature => {
+                bsec_virtual_sensor_t_BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE
+            }
+            SensorHeatCompensatedHumidity => {
+                bsec_virtual_sensor_t_BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY
+            }
+            DebugCompensatedGas => bsec_virtual_sensor_t_BSEC_OUTPUT_COMPENSATED_GAS,
+            GasPercentage => bsec_virtual_sensor_t_BSEC_OUTPUT_GAS_PERCENTAGE,
+        }
+    }
+}
+
+impl From<VirtualSensorOutput> for u8 {
+    fn from(virtual_sensor: VirtualSensorOutput) -> Self {
+        bsec_virtual_sensor_t::from(virtual_sensor) as u8
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum Error {
+    ArgumentListTooLong,
     BsecAlreadyInUse,
     BsecError(BsecError),
 }
@@ -57,151 +173,39 @@ impl IntoResult for bsec_library_return_t {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug)]
 pub enum BsecError {
-    #[error(
-        "Input (physical) sensor id passed to bsec_do_steps() is not in \
-        the valid range or not valid for requested virtual sensor."
-    )]
     DoStepsInvalidInput,
-    #[error(
-        "Value of input (physical) sensor signal passed to bsec_do_steps() is \
-        not in the valid range."
-    )]
     DoStepsValueLimits,
-    #[error("Duplicate input (physical) sensor ids passed as input to bsec_do_steps().")]
     DoStepsDuplicateInput,
-    #[error(
-        "No memory allocated to hold return values from bsec_do_steps(), i.e., \
-        n_outputs == 0."
-    )]
     DoStepsNoOutputsReturnable,
-    #[error(
-        "Not enough memory allocated to hold return values from \
-        bsec_do_steps(), i.e., n_outputs < maximum number of requested output \
-        (virtual) sensors."
-    )]
     DoStepsExcessOutputs,
-    #[error("Duplicate timestamps passed to bsec_do_steps().")]
     DoStepsTsIntraDiffOutOfRange,
-    #[error(
-        "The sample_rate of the requested output (virtual) sensor passed to \
-        bsec_update_subscription() is zero."
-    )]
     UpdateSubscriptionWrongDataRate,
-    #[error(
-        "The sample_rate of the requested output (virtual) sensor passed to \
-        bsec_update_subscription() does not match with the sampling rate \
-        allowed for that sensor."
-    )]
     UpdateSubscriptionSampleRateLimits,
-    #[error(
-        "Duplicate output (virtual) sensor ids requested through \
-        bsec_update_subscription()."
-    )]
     UpdateSubscriptionDuplicateGate,
-    #[error(
-        "The sample_rate of the requested output (virtual) sensor passed to \
-        bsec_update_subscription() does not fall within the global minimum and \
-        maximum sampling rates."
-    )]
     UpdateSubscriptionInvalidSampleRate,
-    #[error(
-        "Not enough memory allocated to hold returned input (physical) sensor \
-        data from bsec_update_subscription(), i.e., \
-        n_required_sensor_settings < #BSEC_MAX_PHYSICAL_SENSOR."
-    )]
     UpdateSubscriptionGateCountExceedsArray,
-    #[error(
-        "The sample_rate of the requested output (virtual) sensor passed to \
-        bsec_update_subscription() is not correct."
-    )]
     UpdateSubscriptionSampleIntervalIntegerMult,
-    #[error(
-        "The sample_rate of the requested output (virtual), which requires the \
-        gas sensor, is not equal to the sample_rate that the gas sensor is \
-        being operated."
-    )]
     UpdateSubscriptionMultGaaSamplInterval,
-    #[error(
-        "The duration of one measurement is longer than the requested sampling \
-        interval."
-    )]
     UpdateSubscriptionHighHeaterOnDuration,
-    #[error(
-        "Output (virtual) sensor id passed to bsec_update_subscription() is \
-        not in the valid range; e.g., n_requested_virtual_sensors > actual \
-        number of output (virtual) sensors requested."
-    )]
     UpdateSubscriptionUnkownOutputGate,
-    #[error("ULP plus can not be requested in non-ulp mode.")]
     UpdateSubscriptionModeInNonUlp,
-    #[error(
-        "No output (virtual) sensor data were requested \
-        via bsec_update_subscription()."
-    )]
     UpdateSubscriptionSubscribedOutputGates,
-    #[error(
-        "n_work_buffer_size passed to bsec_set_[configuration/state]() not \
-        sufficient."
-    )]
     ParseSectionExceedsWorkBuffer,
-    #[error("Configuration failed.")]
     ConfigFail,
-    #[error(
-        "Version encoded in serialized_[settings/state] passed to \
-        bsec_set_[configuration/state]() does not match with current version."
-    )]
     ConfigVersionMismatch,
-    #[error(
-        "Enabled features encoded in serialized_[settings/state] passed to \
-        bsec_set_[configuration/state]() does not match with current library \
-        implementation."
-    )]
     ConfigFeatureMismatch,
-    #[error(
-        "serialized_[settings/state] passed to \
-        bsec_set_[configuration/state]() is corrupted."
-    )]
     ConfigCrcMismatch,
-    #[error(
-        "n_serialized_[settings/state] passed to \
-        bsec_set_[configuration/state]() is to short to be valid."
-    )]
     ConfigEmpty,
-    #[error("Provided work_buffer is not large enough to hold the desired string.")]
     ConfigInsufficientWorkBuffer,
-    #[error(
-        "String size encoded in configuration/state strings passed to \
-        bsec_set_[configuration/state]() does not match with the actual string \
-        size n_serialized_[settings/state] passed to these functions."
-    )]
     ConfigInvalidStringSize,
-    #[error("String buffer insufficient to hold serialized data from BSEC library.")]
     ConfigInsufficientBuffer,
-    #[error(
-        "Internal error code, size of work buffer in setConfig must be set to \
-        BSEC_MAX_WORKBUFFER_SIZE."
-    )]
     SetInvalidChannelIdentifier,
-    #[error("Internal error code.")]
     SetInvalidLength,
-    #[error(
-        "Difference between actual and defined sampling intervals of \
-        bsec_sensor_control() greater than allowed."
-    )]
     SensorControlCallTimingViolation,
-    #[error(
-        "ULP plus is not allowed because an ULP measurement just took or will \
-        take place"
-    )]
     SensorControlModeExceedsUlpTimelimit,
-    #[error(
-        "ULP plus is not allowed because not sufficient time passed since last \
-        ULP plus."
-    )]
     SensorControlModeInsufficientWaitTime,
-    #[error("Unknown error.")]
     Unknown(bsec_library_return_t),
 }
 
