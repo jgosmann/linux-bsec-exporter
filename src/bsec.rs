@@ -1,32 +1,81 @@
 use self::ffi::*;
+use std::collections::HashSet;
 use std::convert::{From, TryFrom, TryInto};
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static BSEC_IN_USE: AtomicBool = AtomicBool::new(false);
 
-pub struct Bsec {
-    _disallow_creation_by_member_initialization: (),
+pub trait Time {
+    fn timestamp_ns() -> i64;
 }
 
-impl Bsec {
-    fn init() -> Result<Self, Error> {
+pub struct BmeSettingsHandle<'a> {
+    bme_settings: &'a bsec_bme_settings_t,
+}
+
+impl<'a> BmeSettingsHandle<'a> {
+    fn new(bme_settings: &'a bsec_bme_settings_t) -> Self {
+        Self { bme_settings }
+    }
+    pub fn heater_temperature(&self) -> u16 {
+        self.bme_settings.heater_temperature
+    }
+    pub fn heating_duration(&self) -> u16 {
+        self.bme_settings.heating_duration
+    }
+    pub fn run_gas(&self) -> bool {
+        self.bme_settings.run_gas == 1
+    }
+    pub fn pressure_oversampling(&self) -> u8 {
+        self.bme_settings.pressure_oversampling
+    }
+    pub fn temperature_oversampling(&self) -> u8 {
+        self.bme_settings.temperature_oversampling
+    }
+    pub fn humidity_oversampling(&self) -> u8 {
+        self.bme_settings.humidity_oversampling
+    }
+}
+
+pub struct BmeOutput {
+    pub signal: f32,
+    pub sensor: PhysicalSensorInput,
+}
+
+pub trait BmeSensor {
+    fn perform_measurement(&mut self, settings: &BmeSettingsHandle) -> Vec<BmeOutput>;
+}
+
+pub struct Bsec<S: BmeSensor, T: Time> {
+    bme: S,
+    subscribed: HashSet<VirtualSensorOutput>,
+    ulp_plus_queue: HashSet<VirtualSensorOutput>,
+    _time: PhantomData<T>,
+}
+
+impl<S: BmeSensor, T: Time> Bsec<S, T> {
+    pub fn init(bme: S) -> Result<Self, Error> {
         if !BSEC_IN_USE.compare_and_swap(false, true, Ordering::SeqCst) {
             unsafe {
                 bsec_init().into_result()?;
             }
             Ok(Self {
-                _disallow_creation_by_member_initialization: (),
+                bme,
+                subscribed: HashSet::new(),
+                ulp_plus_queue: HashSet::new(),
+                _time: PhantomData,
             })
         } else {
             Err(Error::BsecAlreadyInUse)
         }
     }
 
-    fn update_subscription(
+    pub fn update_subscription(
         &mut self,
         requested_outputs: &Vec<RequestedSensorConfiguration>,
     ) -> Result<Vec<RequiredSensorSettings>, Error> {
-        let requested_outputs: Vec<bsec_sensor_configuration_t> =
+        let bsec_requested_outputs: Vec<bsec_sensor_configuration_t> =
             requested_outputs.iter().map(From::from).collect();
         let mut required_sensor_settings = [bsec_sensor_configuration_t {
             sample_rate: 0.,
@@ -35,7 +84,7 @@ impl Bsec {
         let mut n_required_sensor_settings = NUM_PHYSICAL_SENSORS;
         unsafe {
             bsec_update_subscription(
-                requested_outputs.as_ptr(),
+                bsec_requested_outputs.as_ptr(),
                 requested_outputs
                     .len()
                     .try_into()
@@ -45,17 +94,145 @@ impl Bsec {
             )
             .into_result()?
         }
+        for changed in requested_outputs.iter() {
+            match changed.sample_rate {
+                SampleRate::Disabled => {
+                    self.subscribed.remove(&changed.sensor);
+                    self.ulp_plus_queue.remove(&changed.sensor);
+                }
+                SampleRate::UlpMeasurementOnDemand => {
+                    self.ulp_plus_queue.insert(changed.sensor);
+                }
+                _ => {
+                    self.subscribed.insert(changed.sensor);
+                }
+            }
+        }
         required_sensor_settings
             .iter()
             .take(n_required_sensor_settings as usize)
             .map(RequiredSensorSettings::try_from)
             .collect()
     }
+
+    pub fn do_step(&mut self) -> Result<Output, Error> {
+        let mut bme_settings = bsec_bme_settings_t {
+            next_call: 0,
+            process_data: 0,
+            heater_temperature: 0,
+            heating_duration: 0,
+            run_gas: 0,
+            pressure_oversampling: 0,
+            temperature_oversampling: 0,
+            humidity_oversampling: 0,
+            trigger_measurement: 0,
+        };
+        unsafe {
+            bsec_sensor_control(T::timestamp_ns(), &mut bme_settings).into_result()?;
+        }
+        let inputs = self
+            .bme
+            .perform_measurement(&BmeSettingsHandle::new(&bme_settings));
+        let time_stamp = T::timestamp_ns();
+        let inputs: Vec<bsec_input_t> = inputs
+            .iter()
+            .map(|o| bsec_input_t {
+                time_stamp,
+                signal: o.signal,
+                signal_dimensions: 1,
+                sensor_id: o.sensor.into(),
+            })
+            .collect();
+        let mut outputs = vec![
+            bsec_output_t {
+                time_stamp: 0,
+                signal: 0.,
+                signal_dimensions: 1,
+                sensor_id: 0,
+                accuracy: 0,
+            };
+            (&self.subscribed & &self.ulp_plus_queue).len()
+        ];
+        let mut num_outputs: u8 = outputs
+            .len()
+            .try_into()
+            .or(Err(Error::ArgumentListTooLong))?;
+        self.ulp_plus_queue.clear();
+        unsafe {
+            bsec_do_steps(
+                inputs.as_ptr(),
+                inputs
+                    .len()
+                    .try_into()
+                    .or(Err(Error::ArgumentListTooLong))?,
+                outputs.as_mut_ptr(),
+                &mut num_outputs,
+            );
+        }
+
+        let signals: Result<Vec<OutputSignal>, Error> = outputs
+            .iter()
+            .take(num_outputs.into())
+            .map(OutputSignal::try_from)
+            .collect();
+        Ok(Output {
+            next_call: bme_settings.next_call,
+            signals: signals?,
+        })
+    }
 }
 
-impl Drop for Bsec {
+impl<S: BmeSensor, T: Time> Drop for Bsec<S, T> {
     fn drop(&mut self) {
         BSEC_IN_USE.store(false, Ordering::SeqCst);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Output {
+    next_call: i64,
+    signals: Vec<OutputSignal>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OutputSignal {
+    timestamp_ns: i64,
+    signal: f64,
+    sensor: VirtualSensorOutput,
+    accuracy: Accuracy,
+}
+
+impl TryFrom<&bsec_output_t> for OutputSignal {
+    type Error = Error;
+    fn try_from(output: &bsec_output_t) -> Result<Self, Error> {
+        Ok(Self {
+            timestamp_ns: output.time_stamp,
+            signal: output.signal.into(),
+            sensor: output.sensor_id.try_into()?,
+            accuracy: output.accuracy.try_into()?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Accuracy {
+    Unreliable,
+    LowAccuracy,
+    MediumAccuracy,
+    HighAccuracy,
+}
+
+impl TryFrom<u8> for Accuracy {
+    type Error = Error;
+    fn try_from(accuracy: u8) -> Result<Self, Error> {
+        use Accuracy::*;
+        match accuracy {
+            0 => Ok(Unreliable),
+            1 => Ok(LowAccuracy),
+            2 => Ok(MediumAccuracy),
+            3 => Ok(HighAccuracy),
+            _ => Err(Error::InvalidAccuracy(accuracy)),
+        }
     }
 }
 
@@ -90,7 +267,7 @@ impl TryFrom<&bsec_sensor_configuration_t> for RequiredSensorSettings {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SampleRate {
     Disabled,
     Ulp,
@@ -142,7 +319,7 @@ impl From<SampleRate> for f64 {
 
 pub const NUM_PHYSICAL_SENSORS: u8 = 6;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PhysicalSensorInput {
     Pressure,
     Humidity,
@@ -178,7 +355,27 @@ impl TryFrom<u32> for PhysicalSensorInput {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+impl From<PhysicalSensorInput> for bsec_physical_sensor_t {
+    fn from(physical_sensor: PhysicalSensorInput) -> Self {
+        use PhysicalSensorInput::*;
+        match physical_sensor {
+            Pressure => bsec_physical_sensor_t_BSEC_INPUT_PRESSURE,
+            Humidity => bsec_physical_sensor_t_BSEC_INPUT_HUMIDITY,
+            Temperature => bsec_physical_sensor_t_BSEC_INPUT_TEMPERATURE,
+            GasResistor => bsec_physical_sensor_t_BSEC_INPUT_GASRESISTOR,
+            HeatSource => bsec_physical_sensor_t_BSEC_INPUT_HEATSOURCE,
+            DisableBaselineTracker => bsec_physical_sensor_t_BSEC_INPUT_DISABLE_BASELINE_TRACKER,
+        }
+    }
+}
+
+impl From<PhysicalSensorInput> for u8 {
+    fn from(physical_sensor: PhysicalSensorInput) -> Self {
+        bsec_physical_sensor_t::from(physical_sensor) as Self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum VirtualSensorOutput {
     Iaq,
     StaticIaq,
@@ -228,13 +425,51 @@ impl From<VirtualSensorOutput> for u8 {
     }
 }
 
+impl TryFrom<bsec_virtual_sensor_t> for VirtualSensorOutput {
+    type Error = Error;
+    fn try_from(virtual_sensor: bsec_virtual_sensor_t) -> Result<Self, Error> {
+        #![allow(non_upper_case_globals)]
+        use VirtualSensorOutput::*;
+        match virtual_sensor {
+            bsec_virtual_sensor_t_BSEC_OUTPUT_IAQ => Ok(Iaq),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_STATIC_IAQ => Ok(StaticIaq),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_CO2_EQUIVALENT => Ok(Co2Equivalent),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_BREATH_VOC_EQUIVALENT => Ok(BreathVocEquivalent),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_RAW_TEMPERATURE => Ok(RawTemperature),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_RAW_PRESSURE => Ok(RawPressure),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_RAW_HUMIDITY => Ok(RawHumidity),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_RAW_GAS => Ok(RawGas),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_STABILIZATION_STATUS => Ok(StabilizationStatus),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_RUN_IN_STATUS => Ok(RunInStatus),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE => {
+                Ok(SensorHeatCompensatedTemperature)
+            }
+            bsec_virtual_sensor_t_BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY => {
+                Ok(SensorHeatCompensatedHumidity)
+            }
+            bsec_virtual_sensor_t_BSEC_OUTPUT_COMPENSATED_GAS => Ok(DebugCompensatedGas),
+            bsec_virtual_sensor_t_BSEC_OUTPUT_GAS_PERCENTAGE => Ok(GasPercentage),
+            _ => Err(Error::InvalidVirtualSensorId(virtual_sensor)),
+        }
+    }
+}
+
+impl TryFrom<u8> for VirtualSensorOutput {
+    type Error = Error;
+    fn try_from(virtual_sensor: u8) -> Result<Self, Error> {
+        Self::try_from(virtual_sensor as bsec_virtual_sensor_t)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Error {
     ArgumentListTooLong,
     BsecAlreadyInUse,
     BsecError(BsecError),
     InvalidSampleRate(f64),
-    InvalidPhysicalSensorId(u32),
+    InvalidPhysicalSensorId(bsec_physical_sensor_t),
+    InvalidVirtualSensorId(bsec_virtual_sensor_t),
+    InvalidAccuracy(u8),
 }
 
 impl From<BsecError> for Error {
@@ -372,12 +607,25 @@ pub mod ffi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct DummyBmeSensor {}
+    struct DummyTime {}
+
+    impl BmeSensor for DummyBmeSensor {
+        fn perform_measurement(&mut self, _: &BmeSettingsHandle<'_>) -> std::vec::Vec<BmeOutput> {
+            unimplemented!()
+        }
+    }
+    impl Time for DummyTime {
+        fn timestamp_ns() -> i64 {
+            unimplemented!()
+        }
+    }
 
     #[test]
     fn cannot_create_mulitple_bsec_at_the_same_time() {
-        let first = Bsec::init().unwrap();
-        assert!(Bsec::init().is_err());
+        let first = Bsec::<_, DummyTime>::init(DummyBmeSensor {}).unwrap();
+        assert!(Bsec::<_, DummyTime>::init(DummyBmeSensor {}).is_err());
         drop(first);
-        let _another = Bsec::init().unwrap();
+        let _another = Bsec::<_, DummyTime>::init(DummyBmeSensor {}).unwrap();
     }
 }
