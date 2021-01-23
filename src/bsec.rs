@@ -209,7 +209,7 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
             )
             .into_result()?;
         }
-        Ok(state[0..state_length as usize].into())
+        Ok(state[..state_length as usize].into())
     }
 
     pub fn set_state(&mut self, state: &[u8]) -> Result<(), Error<S::Error>> {
@@ -222,6 +222,37 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
                 work_buffer.len() as u32,
             )
             .into_result()?;
+        }
+        Ok(())
+    }
+    pub fn get_configuration(&self) -> Result<Vec<u8>, Error<S::Error>> {
+        let mut serialized_settings = [0u8; BSEC_MAX_PROPERTY_BLOB_SIZE as usize];
+        let mut serialized_settings_length = 0u32;
+        let mut work_buffer = [0u8; BSEC_MAX_WORKBUFFER_SIZE as usize];
+        unsafe {
+            bsec_get_configuration(
+                0,
+                serialized_settings.as_mut_ptr(),
+                serialized_settings.len() as u32,
+                work_buffer.as_mut_ptr(),
+                work_buffer.len() as u32,
+                &mut serialized_settings_length,
+            )
+            .into_result()?;
+        }
+        Ok(serialized_settings[..serialized_settings_length as usize].into())
+    }
+
+    pub fn set_configuration(&mut self, serialized_settings: &[u8]) -> Result<(), Error<S::Error>> {
+        let mut work_buffer = [0u8; BSEC_MAX_WORKBUFFER_SIZE as usize];
+        unsafe {
+            bsec_set_configuration(
+                serialized_settings.as_ptr(),
+                serialized_settings.len() as u32,
+                work_buffer.as_mut_ptr(),
+                work_buffer.len() as u32,
+            )
+            .into_result()?
         }
         Ok(())
     }
@@ -781,5 +812,16 @@ mod tests {
         let mut bsec = Bsec::init(sensor, &time).unwrap();
         let state = bsec.get_state().unwrap();
         bsec.set_state(&state).unwrap();
+    }
+    #[test]
+    #[serial]
+    fn configuration_roundtrip_smoke_test() {
+        let time = FakeTime::default();
+        let sensor = FakeBmeSensor::default();
+        let mut bsec = Bsec::init(sensor, &time).unwrap();
+        let config = include_bytes!("../bsec/config/generic_33v_3s_4d/bsec_iaq.config");
+        let config = &config[4..]; // First 4 bytes give config length
+        bsec.set_configuration(config).unwrap();
+        assert_eq!(bsec.get_configuration().unwrap(), config);
     }
 }
