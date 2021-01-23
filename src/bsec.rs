@@ -1,13 +1,12 @@
 use self::ffi::*;
 use std::collections::HashSet;
 use std::convert::{From, TryFrom, TryInto};
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static BSEC_IN_USE: AtomicBool = AtomicBool::new(false);
 
 pub trait Time {
-    fn timestamp_ns() -> i64;
+    fn timestamp_ns(&self) -> i64;
 }
 
 pub struct BmeSettingsHandle<'a> {
@@ -38,24 +37,29 @@ impl<'a> BmeSettingsHandle<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct BmeOutput {
     pub signal: f32,
     pub sensor: PhysicalSensorInput,
 }
 
 pub trait BmeSensor {
-    fn perform_measurement(&mut self, settings: &BmeSettingsHandle) -> Vec<BmeOutput>;
+    type Error;
+    fn perform_measurement(
+        &mut self,
+        settings: &BmeSettingsHandle,
+    ) -> Result<Vec<BmeOutput>, Self::Error>;
 }
 
-pub struct Bsec<S: BmeSensor, T: Time> {
+pub struct Bsec<'t, S: BmeSensor, T: Time> {
     bme: S,
     subscribed: HashSet<VirtualSensorOutput>,
     ulp_plus_queue: HashSet<VirtualSensorOutput>,
-    _time: PhantomData<T>,
+    time: &'t T,
 }
 
-impl<S: BmeSensor, T: Time> Bsec<S, T> {
-    pub fn init(bme: S) -> Result<Self, Error> {
+impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
+    pub fn init(bme: S, time: &'t T) -> Result<Self, Error<S::Error>> {
         if !BSEC_IN_USE.compare_and_swap(false, true, Ordering::SeqCst) {
             unsafe {
                 bsec_init().into_result()?;
@@ -64,7 +68,7 @@ impl<S: BmeSensor, T: Time> Bsec<S, T> {
                 bme,
                 subscribed: HashSet::new(),
                 ulp_plus_queue: HashSet::new(),
-                _time: PhantomData,
+                time,
             })
         } else {
             Err(Error::BsecAlreadyInUse)
@@ -74,14 +78,14 @@ impl<S: BmeSensor, T: Time> Bsec<S, T> {
     pub fn update_subscription(
         &mut self,
         requested_outputs: &Vec<RequestedSensorConfiguration>,
-    ) -> Result<Vec<RequiredSensorSettings>, Error> {
+    ) -> Result<Vec<RequiredSensorSettings>, Error<S::Error>> {
         let bsec_requested_outputs: Vec<bsec_sensor_configuration_t> =
             requested_outputs.iter().map(From::from).collect();
         let mut required_sensor_settings = [bsec_sensor_configuration_t {
             sample_rate: 0.,
             sensor_id: 0,
-        }; NUM_PHYSICAL_SENSORS as usize];
-        let mut n_required_sensor_settings = NUM_PHYSICAL_SENSORS;
+        }; ffi::BSEC_MAX_PHYSICAL_SENSOR as usize];
+        let mut n_required_sensor_settings = ffi::BSEC_MAX_PHYSICAL_SENSOR as u8;
         unsafe {
             bsec_update_subscription(
                 bsec_requested_outputs.as_ptr(),
@@ -108,14 +112,15 @@ impl<S: BmeSensor, T: Time> Bsec<S, T> {
                 }
             }
         }
-        required_sensor_settings
+        // FIXME why are we getting invalid sensor ids?
+        Ok(required_sensor_settings
             .iter()
             .take(n_required_sensor_settings as usize)
-            .map(RequiredSensorSettings::try_from)
-            .collect()
+            .filter_map(|x| RequiredSensorSettings::try_from(x).ok())
+            .collect())
     }
 
-    pub fn do_step(&mut self) -> Result<Output, Error> {
+    pub fn do_step(&mut self) -> Result<Output, Error<S::Error>> {
         let mut bme_settings = bsec_bme_settings_t {
             next_call: 0,
             process_data: 0,
@@ -128,12 +133,19 @@ impl<S: BmeSensor, T: Time> Bsec<S, T> {
             trigger_measurement: 0,
         };
         unsafe {
-            bsec_sensor_control(T::timestamp_ns(), &mut bme_settings).into_result()?;
+            bsec_sensor_control(self.time.timestamp_ns(), &mut bme_settings).into_result()?;
+        }
+        if bme_settings.trigger_measurement != 1 {
+            return Ok(Output {
+                next_call: bme_settings.next_call,
+                signals: vec![],
+            });
         }
         let inputs = self
             .bme
-            .perform_measurement(&BmeSettingsHandle::new(&bme_settings));
-        let time_stamp = T::timestamp_ns();
+            .perform_measurement(&BmeSettingsHandle::new(&bme_settings))
+            .map_err(Error::BmeSensorError)?;
+        let time_stamp = self.time.timestamp_ns();
         let inputs: Vec<bsec_input_t> = inputs
             .iter()
             .map(|o| bsec_input_t {
@@ -151,7 +163,7 @@ impl<S: BmeSensor, T: Time> Bsec<S, T> {
                 sensor_id: 0,
                 accuracy: 0,
             };
-            (&self.subscribed & &self.ulp_plus_queue).len()
+            (&self.subscribed | &self.ulp_plus_queue).len()
         ];
         let mut num_outputs: u8 = outputs
             .len()
@@ -170,10 +182,10 @@ impl<S: BmeSensor, T: Time> Bsec<S, T> {
             );
         }
 
-        let signals: Result<Vec<OutputSignal>, Error> = outputs
+        let signals: Result<Vec<OutputSignal>, Error<S::Error>> = outputs
             .iter()
             .take(num_outputs.into())
-            .map(OutputSignal::try_from)
+            .map(|x| OutputSignal::try_from(x).map_err(Error::<S::Error>::from))
             .collect();
         Ok(Output {
             next_call: bme_settings.next_call,
@@ -182,7 +194,7 @@ impl<S: BmeSensor, T: Time> Bsec<S, T> {
     }
 }
 
-impl<S: BmeSensor, T: Time> Drop for Bsec<S, T> {
+impl<'t, S: BmeSensor, T: Time> Drop for Bsec<'t, S, T> {
     fn drop(&mut self) {
         BSEC_IN_USE.store(false, Ordering::SeqCst);
     }
@@ -190,21 +202,21 @@ impl<S: BmeSensor, T: Time> Drop for Bsec<S, T> {
 
 #[derive(Clone, Debug)]
 pub struct Output {
-    next_call: i64,
-    signals: Vec<OutputSignal>,
+    pub next_call: i64,
+    pub signals: Vec<OutputSignal>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct OutputSignal {
-    timestamp_ns: i64,
-    signal: f64,
-    sensor: VirtualSensorOutput,
-    accuracy: Accuracy,
+    pub timestamp_ns: i64,
+    pub signal: f64,
+    pub sensor: VirtualSensorOutput,
+    pub accuracy: Accuracy,
 }
 
 impl TryFrom<&bsec_output_t> for OutputSignal {
-    type Error = Error;
-    fn try_from(output: &bsec_output_t) -> Result<Self, Error> {
+    type Error = ConversionError;
+    fn try_from(output: &bsec_output_t) -> Result<Self, ConversionError> {
         Ok(Self {
             timestamp_ns: output.time_stamp,
             signal: output.signal.into(),
@@ -223,23 +235,23 @@ pub enum Accuracy {
 }
 
 impl TryFrom<u8> for Accuracy {
-    type Error = Error;
-    fn try_from(accuracy: u8) -> Result<Self, Error> {
+    type Error = ConversionError;
+    fn try_from(accuracy: u8) -> Result<Self, ConversionError> {
         use Accuracy::*;
         match accuracy {
             0 => Ok(Unreliable),
             1 => Ok(LowAccuracy),
             2 => Ok(MediumAccuracy),
             3 => Ok(HighAccuracy),
-            _ => Err(Error::InvalidAccuracy(accuracy)),
+            _ => Err(ConversionError::InvalidAccuracy(accuracy)),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct RequestedSensorConfiguration {
-    sample_rate: SampleRate,
-    sensor: VirtualSensorOutput,
+    pub sample_rate: SampleRate,
+    pub sensor: VirtualSensorOutput,
 }
 
 impl From<&RequestedSensorConfiguration> for bsec_sensor_configuration_t {
@@ -253,15 +265,17 @@ impl From<&RequestedSensorConfiguration> for bsec_sensor_configuration_t {
 
 #[derive(Clone, Copy, Debug)]
 pub struct RequiredSensorSettings {
-    sample_rate: SampleRate,
+    sample_rate: f32,
     sensor: PhysicalSensorInput,
 }
 
 impl TryFrom<&bsec_sensor_configuration_t> for RequiredSensorSettings {
-    type Error = Error;
-    fn try_from(sensor_configuration: &bsec_sensor_configuration_t) -> Result<Self, Error> {
+    type Error = ConversionError;
+    fn try_from(
+        sensor_configuration: &bsec_sensor_configuration_t,
+    ) -> Result<Self, ConversionError> {
         Ok(Self {
-            sample_rate: SampleRate::try_from(sensor_configuration.sample_rate)?,
+            sample_rate: sensor_configuration.sample_rate,
             sensor: PhysicalSensorInput::try_from(sensor_configuration.sensor_id)?,
         })
     }
@@ -274,28 +288,6 @@ pub enum SampleRate {
     Continuous,
     Lp,
     UlpMeasurementOnDemand,
-}
-
-impl TryFrom<f32> for SampleRate {
-    type Error = Error;
-    fn try_from(sample_rate: f32) -> Result<Self, Error> {
-        Self::try_from(sample_rate as f64)
-    }
-}
-
-impl TryFrom<f64> for SampleRate {
-    type Error = Error;
-    fn try_from(sample_rate: f64) -> Result<Self, Error> {
-        use SampleRate::*;
-        match sample_rate {
-            sr if sr == BSEC_SAMPLE_RATE_DISABLED => Ok(Disabled),
-            sr if sr == BSEC_SAMPLE_RATE_ULP => Ok(Ulp),
-            sr if sr == BSEC_SAMPLE_RATE_CONTINUOUS => Ok(Continuous),
-            sr if sr == BSEC_SAMPLE_RATE_LP => Ok(Lp),
-            sr if sr == BSEC_SAMPLE_RATE_ULP_MEASUREMENT_ON_DEMAND => Ok(UlpMeasurementOnDemand),
-            sample_rate => Err(Error::InvalidSampleRate(sample_rate)),
-        }
-    }
 }
 
 impl From<SampleRate> for f32 {
@@ -317,8 +309,6 @@ impl From<SampleRate> for f64 {
     }
 }
 
-pub const NUM_PHYSICAL_SENSORS: u8 = 6;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PhysicalSensorInput {
     Pressure,
@@ -330,15 +320,15 @@ pub enum PhysicalSensorInput {
 }
 
 impl TryFrom<u8> for PhysicalSensorInput {
-    type Error = Error;
-    fn try_from(physical_sensor: u8) -> Result<Self, Error> {
+    type Error = ConversionError;
+    fn try_from(physical_sensor: u8) -> Result<Self, ConversionError> {
         Self::try_from(physical_sensor as u32)
     }
 }
 
 impl TryFrom<u32> for PhysicalSensorInput {
-    type Error = Error;
-    fn try_from(physical_sensor: u32) -> Result<Self, Error> {
+    type Error = ConversionError;
+    fn try_from(physical_sensor: u32) -> Result<Self, ConversionError> {
         #![allow(non_upper_case_globals)]
         use PhysicalSensorInput::*;
         match physical_sensor {
@@ -350,7 +340,7 @@ impl TryFrom<u32> for PhysicalSensorInput {
             bsec_physical_sensor_t_BSEC_INPUT_DISABLE_BASELINE_TRACKER => {
                 Ok(DisableBaselineTracker)
             }
-            physical_sensor => Err(Error::InvalidPhysicalSensorId(physical_sensor)),
+            physical_sensor => Err(ConversionError::InvalidPhysicalSensorId(physical_sensor)),
         }
     }
 }
@@ -426,8 +416,8 @@ impl From<VirtualSensorOutput> for u8 {
 }
 
 impl TryFrom<bsec_virtual_sensor_t> for VirtualSensorOutput {
-    type Error = Error;
-    fn try_from(virtual_sensor: bsec_virtual_sensor_t) -> Result<Self, Error> {
+    type Error = ConversionError;
+    fn try_from(virtual_sensor: bsec_virtual_sensor_t) -> Result<Self, ConversionError> {
         #![allow(non_upper_case_globals)]
         use VirtualSensorOutput::*;
         match virtual_sensor {
@@ -449,33 +439,54 @@ impl TryFrom<bsec_virtual_sensor_t> for VirtualSensorOutput {
             }
             bsec_virtual_sensor_t_BSEC_OUTPUT_COMPENSATED_GAS => Ok(DebugCompensatedGas),
             bsec_virtual_sensor_t_BSEC_OUTPUT_GAS_PERCENTAGE => Ok(GasPercentage),
-            _ => Err(Error::InvalidVirtualSensorId(virtual_sensor)),
+            _ => Err(ConversionError::InvalidVirtualSensorId(virtual_sensor)),
         }
     }
 }
 
 impl TryFrom<u8> for VirtualSensorOutput {
-    type Error = Error;
-    fn try_from(virtual_sensor: u8) -> Result<Self, Error> {
+    type Error = ConversionError;
+    fn try_from(virtual_sensor: u8) -> Result<Self, ConversionError> {
         Self::try_from(virtual_sensor as bsec_virtual_sensor_t)
     }
 }
 
 #[derive(Clone, Debug)]
-pub enum Error {
+pub enum Error<E> {
     ArgumentListTooLong,
     BsecAlreadyInUse,
     BsecError(BsecError),
+    ConversionError(ConversionError),
+    BmeSensorError(E),
+}
+
+impl<E> std::fmt::Display for Error<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        // TODO
+        f.write_fmt(format_args!("Error"))
+    }
+}
+
+impl<E: std::fmt::Debug> std::error::Error for Error<E> {}
+
+impl<E> From<BsecError> for Error<E> {
+    fn from(bsec_error: BsecError) -> Self {
+        Self::BsecError(bsec_error)
+    }
+}
+
+impl<E> From<ConversionError> for Error<E> {
+    fn from(conversion_error: ConversionError) -> Self {
+        Self::ConversionError(conversion_error)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ConversionError {
     InvalidSampleRate(f64),
     InvalidPhysicalSensorId(bsec_physical_sensor_t),
     InvalidVirtualSensorId(bsec_virtual_sensor_t),
     InvalidAccuracy(u8),
-}
-
-impl From<BsecError> for Error {
-    fn from(bsec_error: BsecError) -> Self {
-        Self::BsecError(bsec_error)
-    }
 }
 
 type BsecResult = Result<(), BsecError>;
@@ -611,21 +622,25 @@ mod tests {
     struct DummyTime {}
 
     impl BmeSensor for DummyBmeSensor {
-        fn perform_measurement(&mut self, _: &BmeSettingsHandle<'_>) -> std::vec::Vec<BmeOutput> {
+        type Error = ();
+        fn perform_measurement(
+            &mut self,
+            _: &BmeSettingsHandle<'_>,
+        ) -> Result<std::vec::Vec<BmeOutput>, ()> {
             unimplemented!()
         }
     }
     impl Time for DummyTime {
-        fn timestamp_ns() -> i64 {
+        fn timestamp_ns(&self) -> i64 {
             unimplemented!()
         }
     }
 
     #[test]
     fn cannot_create_mulitple_bsec_at_the_same_time() {
-        let first = Bsec::<_, DummyTime>::init(DummyBmeSensor {}).unwrap();
-        assert!(Bsec::<_, DummyTime>::init(DummyBmeSensor {}).is_err());
+        let first = Bsec::init(DummyBmeSensor {}, &DummyTime {}).unwrap();
+        assert!(Bsec::init(DummyBmeSensor {}, &DummyTime {}).is_err());
         drop(first);
-        let _another = Bsec::<_, DummyTime>::init(DummyBmeSensor {}).unwrap();
+        let _another = Bsec::init(DummyBmeSensor {}, &DummyTime {}).unwrap();
     }
 }
