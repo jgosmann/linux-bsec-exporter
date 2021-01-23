@@ -258,6 +258,24 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
     }
 }
 
+pub fn get_version() -> Result<(u8, u8, u8, u8), BsecError> {
+    let mut version = bsec_version_t {
+        major: 0,
+        minor: 0,
+        major_bugfix: 0,
+        minor_bugfix: 0,
+    };
+    unsafe {
+        bsec_get_version(&mut version).into_result()?;
+    }
+    Ok((
+        version.major,
+        version.minor,
+        version.major_bugfix,
+        version.minor_bugfix,
+    ))
+}
+
 impl<'t, S: BmeSensor, T: Time> Drop for Bsec<'t, S, T> {
     fn drop(&mut self) {
         BSEC_IN_USE.store(false, Ordering::SeqCst);
@@ -804,6 +822,7 @@ mod tests {
             6000.
         );
     }
+
     #[test]
     #[serial]
     fn roundtrip_state_smoke_test() {
@@ -813,6 +832,7 @@ mod tests {
         let state = bsec.get_state().unwrap();
         bsec.set_state(&state).unwrap();
     }
+
     #[test]
     #[serial]
     fn configuration_roundtrip_smoke_test() {
@@ -823,5 +843,13 @@ mod tests {
         let config = &config[4..]; // First 4 bytes give config length
         bsec.set_configuration(config).unwrap();
         assert_eq!(bsec.get_configuration().unwrap(), config);
+    }
+
+    #[test]
+    fn get_version_smoke_test() {
+        let version = get_version().unwrap();
+        assert!(version.0 == 1);
+        assert!(version.1 >= 4);
+        assert!(version.1 > 4 || version.2 >= 8);
     }
 }
