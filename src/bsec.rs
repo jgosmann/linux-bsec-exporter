@@ -179,7 +179,8 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
                     .or(Err(Error::ArgumentListTooLong))?,
                 outputs.as_mut_ptr(),
                 &mut num_outputs,
-            );
+            )
+            .into_result()?;
         }
 
         let signals: Result<Vec<OutputSignal>, Error<S::Error>> = outputs
@@ -191,6 +192,38 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
             next_call: bme_settings.next_call,
             signals: signals?,
         })
+    }
+
+    pub fn get_state(&self) -> Result<Vec<u8>, Error<S::Error>> {
+        let mut state = [0u8; BSEC_MAX_STATE_BLOB_SIZE as usize];
+        let mut work_buffer = [0u8; BSEC_MAX_WORKBUFFER_SIZE as usize];
+        let mut state_length = BSEC_MAX_STATE_BLOB_SIZE;
+        unsafe {
+            bsec_get_state(
+                0,
+                state.as_mut_ptr(),
+                state.len() as u32,
+                work_buffer.as_mut_ptr(),
+                work_buffer.len() as u32,
+                &mut state_length,
+            )
+            .into_result()?;
+        }
+        Ok(state[0..state_length as usize].into())
+    }
+
+    pub fn set_state(&mut self, state: &[u8]) -> Result<(), Error<S::Error>> {
+        let mut work_buffer = [0u8; BSEC_MAX_WORKBUFFER_SIZE as usize];
+        unsafe {
+            bsec_set_state(
+                state.as_ptr(),
+                state.len() as u32,
+                work_buffer.as_mut_ptr(),
+                work_buffer.len() as u32,
+            )
+            .into_result()?;
+        }
+        Ok(())
     }
 }
 
@@ -647,12 +680,12 @@ mod tests {
 
     #[derive(Default)]
     struct FakeTime {
-        timestame_ns: RefCell<i64>,
+        timestamp_ns: RefCell<i64>,
     }
     impl Time for FakeTime {
         fn timestamp_ns(&self) -> i64 {
-            *self.timestame_ns.borrow_mut() += 1;
-            *self.timestame_ns.borrow()
+            *self.timestamp_ns.borrow_mut() += 1;
+            *self.timestamp_ns.borrow()
         }
     }
 
@@ -739,5 +772,14 @@ mod tests {
             signals.get(&VirtualSensorOutput::RawGas).unwrap().signal,
             6000.
         );
+    }
+    #[test]
+    #[serial]
+    fn roundtrip_state_smoke_test() {
+        let time = FakeTime::default();
+        let sensor = FakeBmeSensor::default();
+        let mut bsec = Bsec::init(sensor, &time).unwrap();
+        let state = bsec.get_state().unwrap();
+        bsec.set_state(&state).unwrap();
     }
 }
