@@ -256,6 +256,13 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
         }
         Ok(())
     }
+
+    pub fn reset_output(&mut self, sensor: VirtualSensorOutput) -> Result<(), Error<S::Error>> {
+        unsafe {
+            bsec_reset_output(sensor.into()).into_result()?;
+        }
+        Ok(())
+    }
 }
 
 pub fn get_version() -> Result<(u8, u8, u8, u8), BsecError> {
@@ -851,5 +858,14 @@ mod tests {
         assert!(version.0 == 1);
         assert!(version.1 >= 4);
         assert!(version.1 > 4 || version.2 >= 8);
+    }
+
+    #[test]
+    #[serial]
+    fn reset_output_smoke_test() {
+        let time = FakeTime::default();
+        let sensor = FakeBmeSensor::default();
+        let mut bsec = Bsec::init(sensor, &time).unwrap();
+        bsec.reset_output(VirtualSensorOutput::Iaq).unwrap();
     }
 }
