@@ -12,3 +12,6 @@ linux-embedded-hal = "0.3.0"
 
 [build-dependencies]
 bindgen = "0.56.0"
+
+[dev-dependencies]
+serial_test = "0.5.1"

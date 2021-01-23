@@ -37,7 +37,7 @@ impl<'a> BmeSettingsHandle<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BmeOutput {
     pub signal: f32,
     pub sensor: PhysicalSensorInput,
@@ -618,29 +618,126 @@ pub mod ffi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct DummyBmeSensor {}
-    struct DummyTime {}
+    use serial_test::serial;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
 
-    impl BmeSensor for DummyBmeSensor {
+    struct FakeBmeSensor {
+        measurement: Result<Vec<BmeOutput>, ()>,
+    }
+    impl FakeBmeSensor {
+        fn new(measurement: Result<Vec<BmeOutput>, ()>) -> Self {
+            Self { measurement }
+        }
+    }
+    impl Default for FakeBmeSensor {
+        fn default() -> Self {
+            Self::new(Ok(vec![]))
+        }
+    }
+    impl BmeSensor for FakeBmeSensor {
         type Error = ();
         fn perform_measurement(
             &mut self,
             _: &BmeSettingsHandle<'_>,
         ) -> Result<std::vec::Vec<BmeOutput>, ()> {
-            unimplemented!()
+            self.measurement.clone()
         }
     }
-    impl Time for DummyTime {
+
+    #[derive(Default)]
+    struct FakeTime {
+        timestame_ns: RefCell<i64>,
+    }
+    impl Time for FakeTime {
         fn timestamp_ns(&self) -> i64 {
-            unimplemented!()
+            *self.timestame_ns.borrow_mut() += 1;
+            *self.timestame_ns.borrow()
         }
     }
 
     #[test]
+    #[serial]
     fn cannot_create_mulitple_bsec_at_the_same_time() {
-        let first = Bsec::init(DummyBmeSensor {}, &DummyTime {}).unwrap();
-        assert!(Bsec::init(DummyBmeSensor {}, &DummyTime {}).is_err());
+        let time = FakeTime::default();
+        let first = Bsec::init(FakeBmeSensor::default(), &time).unwrap();
+        assert!(Bsec::init(FakeBmeSensor::default(), &time).is_err());
         drop(first);
-        let _another = Bsec::init(DummyBmeSensor {}, &DummyTime {}).unwrap();
+        let _another = Bsec::init(FakeBmeSensor::default(), &time).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn basic_bsec_operation_smoke_test() {
+        let time = FakeTime::default();
+        let sensor = FakeBmeSensor::new(Ok(vec![
+            BmeOutput {
+                sensor: PhysicalSensorInput::Temperature,
+                signal: 22.,
+            },
+            BmeOutput {
+                sensor: PhysicalSensorInput::Humidity,
+                signal: 40.,
+            },
+            BmeOutput {
+                sensor: PhysicalSensorInput::Pressure,
+                signal: 1000.,
+            },
+            BmeOutput {
+                sensor: PhysicalSensorInput::GasResistor,
+                signal: 6000.,
+            },
+        ]));
+        let mut bsec = Bsec::init(sensor, &time).unwrap();
+        bsec.update_subscription(&vec![
+            RequestedSensorConfiguration {
+                sample_rate: SampleRate::Lp,
+                sensor: VirtualSensorOutput::RawTemperature,
+            },
+            RequestedSensorConfiguration {
+                sample_rate: SampleRate::Lp,
+                sensor: VirtualSensorOutput::RawHumidity,
+            },
+            RequestedSensorConfiguration {
+                sample_rate: SampleRate::Lp,
+                sensor: VirtualSensorOutput::RawPressure,
+            },
+            RequestedSensorConfiguration {
+                sample_rate: SampleRate::Lp,
+                sensor: VirtualSensorOutput::RawGas,
+            },
+        ])
+        .unwrap();
+
+        let outputs = bsec.do_step().unwrap();
+        assert_eq!(outputs.next_call, 3_000_000_001);
+
+        let signals: HashMap<VirtualSensorOutput, &OutputSignal> =
+            outputs.signals.iter().map(|s| (s.sensor, s)).collect();
+        assert_eq!(
+            signals
+                .get(&VirtualSensorOutput::RawTemperature)
+                .unwrap()
+                .signal,
+            22.
+        );
+        assert_eq!(
+            signals
+                .get(&VirtualSensorOutput::RawHumidity)
+                .unwrap()
+                .signal,
+            40.
+        );
+        assert_eq!(
+            signals
+                .get(&VirtualSensorOutput::RawPressure)
+                .unwrap()
+                .signal,
+            1000.
+        );
+        assert_eq!(
+            signals.get(&VirtualSensorOutput::RawGas).unwrap().signal,
+            6000.
+        );
     }
 }
