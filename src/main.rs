@@ -1,7 +1,7 @@
-use nb::block;
 use std::error::Error;
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bme680::{Bme680, I2CAddress, OversamplingSetting, PowerMode, SettingsBuilder};
@@ -27,15 +27,11 @@ struct TimeAlive {
     start: Instant,
 }
 
-impl TimeAlive {
-    fn new() -> Self {
+impl Default for TimeAlive {
+    fn default() -> Self {
         TimeAlive {
             start: Instant::now(),
         }
-    }
-    fn wait(&self, timestamp_ns: i64) {
-        let duration = Duration::from_nanos((timestamp_ns - self.timestamp_ns()) as u64);
-        std::thread::sleep(duration);
     }
 }
 
@@ -130,12 +126,12 @@ impl BmeSensor for Dev {
 extern crate lazy_static;
 
 lazy_static! {
-    static ref TIME: TimeAlive = TimeAlive::new();
+    static ref TIME: Arc<TimeAlive> = Arc::default();
 }
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
-    let mut bsec = Bsec::init(Dev::new()?, &*TIME)?;
+    let mut bsec = Bsec::init(Dev::new()?, TIME.clone())?;
     let conf = vec![
         RequestedSensorConfiguration {
             sample_rate: SampleRate::Lp,
@@ -163,7 +159,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
 
     local
         .run_until(async move {
-            let mut monitor = Monitor::start(bsec, &*TIME).await.unwrap();
+            let mut monitor = Monitor::start(bsec, TIME.clone()).await.unwrap();
             loop {
                 monitor.current.changed().await.unwrap();
                 let outputs = monitor.current.borrow();

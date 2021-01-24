@@ -1,5 +1,7 @@
 use self::ffi::*;
 use core::convert::{From, TryFrom, TryInto};
+use core::hash::Hash;
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
@@ -49,16 +51,17 @@ pub trait BmeSensor {
     fn get_measurement(&mut self) -> nb::Result<Vec<BmeOutput>, Self::Error>;
 }
 
-pub struct Bsec<'t, S: BmeSensor, T: Time> {
+pub struct Bsec<S: BmeSensor, T: Time, B: AsRef<T>> {
     bme: S,
     subscribed: u32,
     ulp_plus_queue: u32,
     next_measurement: i64,
-    time: &'t T,
+    time: B,
+    _time_type: PhantomData<T>,
 }
 
-impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
-    pub fn init(bme: S, time: &'t T) -> Result<Self, Error<S::Error>> {
+impl<S: BmeSensor, T: Time, B: AsRef<T>> Bsec<S, T, B> {
+    pub fn init(bme: S, time: B) -> Result<Self, Error<S::Error>> {
         if !BSEC_IN_USE.compare_and_swap(false, true, Ordering::SeqCst) {
             unsafe {
                 bsec_init().into_result()?;
@@ -67,8 +70,9 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
                 bme,
                 subscribed: 0,
                 ulp_plus_queue: 0,
-                next_measurement: time.timestamp_ns(),
+                next_measurement: time.as_ref().timestamp_ns(),
                 time,
+                _time_type: PhantomData,
             })
         } else {
             Err(Error::BsecAlreadyInUse)
@@ -136,7 +140,7 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
             trigger_measurement: 0,
         };
         unsafe {
-            bsec_sensor_control(self.time.timestamp_ns(), &mut bme_settings)
+            bsec_sensor_control(self.time.as_ref().timestamp_ns(), &mut bme_settings)
                 .into_result()
                 .map_err(Error::BsecError)?;
         }
@@ -150,7 +154,7 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
             .map_err(nb::Error::Other)
     }
     pub fn process_last_measurement(&mut self) -> nb::Result<Vec<OutputSignal>, Error<S::Error>> {
-        let time_stamp = self.time.timestamp_ns(); // FIXME provide timestamp closer to measurement?
+        let time_stamp = self.time.as_ref().timestamp_ns(); // FIXME provide timestamp closer to measurement?
         let inputs: Vec<bsec_input_t> = self
             .bme
             .get_measurement()
@@ -289,7 +293,7 @@ pub fn get_version() -> Result<(u8, u8, u8, u8), BsecError> {
     ))
 }
 
-impl<'t, S: BmeSensor, T: Time> Drop for Bsec<'t, S, T> {
+impl<S: BmeSensor, T: Time, B: AsRef<T>> Drop for Bsec<S, T, B> {
     fn drop(&mut self) {
         BSEC_IN_USE.store(false, Ordering::SeqCst);
     }
@@ -705,17 +709,26 @@ pub mod ffi {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use serial_test::serial;
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    struct FakeBmeSensor {
-        measurement: nb::Result<Vec<BmeOutput>, ()>,
+    #[derive(Copy, Clone, Debug)]
+    pub struct UnitError;
+    impl std::error::Error for UnitError {}
+    impl std::fmt::Display for UnitError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+            f.write_fmt(format_args!("{:?}", self))
+        }
+    }
+
+    pub struct FakeBmeSensor {
+        measurement: nb::Result<Vec<BmeOutput>, UnitError>,
     }
     impl FakeBmeSensor {
-        fn new(measurement: nb::Result<Vec<BmeOutput>, ()>) -> Self {
+        pub fn new(measurement: nb::Result<Vec<BmeOutput>, UnitError>) -> Self {
             Self { measurement }
         }
     }
@@ -725,20 +738,20 @@ mod tests {
         }
     }
     impl BmeSensor for FakeBmeSensor {
-        type Error = ();
+        type Error = UnitError;
         fn start_measurement(
             &mut self,
             _: &BmeSettingsHandle<'_>,
-        ) -> Result<std::time::Duration, ()> {
+        ) -> Result<std::time::Duration, UnitError> {
             Ok(std::time::Duration::new(0, 0))
         }
-        fn get_measurement(&mut self) -> nb::Result<Vec<BmeOutput>, ()> {
+        fn get_measurement(&mut self) -> nb::Result<Vec<BmeOutput>, UnitError> {
             self.measurement.clone()
         }
     }
 
     #[derive(Default)]
-    struct FakeTime {
+    pub struct FakeTime {
         timestamp_ns: RefCell<i64>,
     }
     impl Time for FakeTime {
@@ -748,8 +761,13 @@ mod tests {
         }
     }
     impl FakeTime {
-        fn advance_by(&self, duration: Duration) {
+        pub fn advance_by(&self, duration: Duration) {
             *self.timestamp_ns.borrow_mut() += duration.as_nanos() as i64;
+        }
+    }
+    impl AsRef<FakeTime> for &FakeTime {
+        fn as_ref(&self) -> &FakeTime {
+            self
         }
     }
 
