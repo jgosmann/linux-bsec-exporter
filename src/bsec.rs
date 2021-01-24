@@ -1,8 +1,7 @@
 use self::ffi::*;
-use std::collections::HashSet;
-use std::convert::{From, TryFrom, TryInto};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use core::convert::{From, TryFrom, TryInto};
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::time::Duration;
 
 static BSEC_IN_USE: AtomicBool = AtomicBool::new(false);
 
@@ -52,8 +51,8 @@ pub trait BmeSensor {
 
 pub struct Bsec<'t, S: BmeSensor, T: Time> {
     bme: S,
-    subscribed: HashSet<VirtualSensorOutput>,
-    ulp_plus_queue: HashSet<VirtualSensorOutput>,
+    subscribed: u32,
+    ulp_plus_queue: u32,
     next_measurement: i64,
     time: &'t T,
 }
@@ -66,8 +65,8 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
             }
             Ok(Self {
                 bme,
-                subscribed: HashSet::new(),
-                ulp_plus_queue: HashSet::new(),
+                subscribed: 0,
+                ulp_plus_queue: 0,
                 next_measurement: time.timestamp_ns(),
                 time,
             })
@@ -102,14 +101,14 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
         for changed in requested_outputs.iter() {
             match changed.sample_rate {
                 SampleRate::Disabled => {
-                    self.subscribed.remove(&changed.sensor);
-                    self.ulp_plus_queue.remove(&changed.sensor);
+                    self.subscribed &= !(changed.sensor as u32);
+                    self.ulp_plus_queue &= !(changed.sensor as u32);
                 }
                 SampleRate::UlpMeasurementOnDemand => {
-                    self.ulp_plus_queue.insert(changed.sensor);
+                    self.ulp_plus_queue |= changed.sensor as u32;
                 }
                 _ => {
-                    self.subscribed.insert(changed.sensor);
+                    self.subscribed |= changed.sensor as u32;
                 }
             }
         }
@@ -172,13 +171,13 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
                 sensor_id: 0,
                 accuracy: 0,
             };
-            (&self.subscribed | &self.ulp_plus_queue).len()
+            (self.subscribed | self.ulp_plus_queue).count_ones() as usize
         ];
         let mut num_outputs: u8 = outputs
             .len()
             .try_into()
             .or(Err(Error::ArgumentListTooLong))?;
-        self.ulp_plus_queue.clear();
+        self.ulp_plus_queue = 0;
         unsafe {
             bsec_do_steps(
                 inputs.as_ptr(),
@@ -266,7 +265,7 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
 
     pub fn reset_output(&mut self, sensor: VirtualSensorOutput) -> Result<(), Error<S::Error>> {
         unsafe {
-            bsec_reset_output(sensor.into()).into_result()?;
+            bsec_reset_output(bsec_virtual_sensor_t::from(sensor) as u8).into_result()?;
         }
         Ok(())
     }
@@ -354,7 +353,7 @@ impl From<&RequestedSensorConfiguration> for bsec_sensor_configuration_t {
     fn from(sensor_configuration: &RequestedSensorConfiguration) -> Self {
         Self {
             sample_rate: sensor_configuration.sample_rate.into(),
-            sensor_id: sensor_configuration.sensor.into(),
+            sensor_id: bsec_virtual_sensor_t::from(sensor_configuration.sensor) as u8,
         }
     }
 }
@@ -463,20 +462,20 @@ impl From<PhysicalSensorInput> for u8 {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum VirtualSensorOutput {
-    Iaq,
-    StaticIaq,
-    Co2Equivalent,
-    BreathVocEquivalent,
-    RawTemperature,
-    RawPressure,
-    RawHumidity,
-    RawGas,
-    StabilizationStatus,
-    RunInStatus,
-    SensorHeatCompensatedTemperature,
-    SensorHeatCompensatedHumidity,
-    DebugCompensatedGas,
-    GasPercentage,
+    Iaq = 0x0001,
+    StaticIaq = 0x0002,
+    Co2Equivalent = 0x0004,
+    BreathVocEquivalent = 0x0008,
+    RawTemperature = 0x0010,
+    RawPressure = 0x0020,
+    RawHumidity = 0x0040,
+    RawGas = 0x0080,
+    StabilizationStatus = 0x0100,
+    RunInStatus = 0x0200,
+    SensorHeatCompensatedTemperature = 0x0400,
+    SensorHeatCompensatedHumidity = 0x0800,
+    DebugCompensatedGas = 0x1000,
+    GasPercentage = 0x2000,
 }
 
 impl From<VirtualSensorOutput> for bsec_virtual_sensor_t {
@@ -502,12 +501,6 @@ impl From<VirtualSensorOutput> for bsec_virtual_sensor_t {
             DebugCompensatedGas => bsec_virtual_sensor_t_BSEC_OUTPUT_COMPENSATED_GAS,
             GasPercentage => bsec_virtual_sensor_t_BSEC_OUTPUT_GAS_PERCENTAGE,
         }
-    }
-}
-
-impl From<VirtualSensorOutput> for u8 {
-    fn from(virtual_sensor: VirtualSensorOutput) -> Self {
-        bsec_virtual_sensor_t::from(virtual_sensor) as u8
     }
 }
 
