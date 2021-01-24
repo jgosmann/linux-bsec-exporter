@@ -1,7 +1,8 @@
+use nb::block;
 use std::error::Error;
 use std::fmt::Debug;
 use std::fmt::Display;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant};
 
 use bme680::{Bme680, I2CAddress, OversamplingSetting, PowerMode, SettingsBuilder};
 use bme680_metrics_exporter::bsec::{
@@ -22,13 +23,13 @@ impl<R: Debug, W: Debug> Display for Bme680Error<R, W> {
 impl<R: Debug, W: Debug> Error for Bme680Error<R, W> {}
 
 struct TimeAlive {
-    start: SystemTime,
+    start: Instant,
 }
 
 impl TimeAlive {
     fn new() -> Self {
         TimeAlive {
-            start: SystemTime::now(),
+            start: Instant::now(),
         }
     }
     fn wait(&self, timestamp_ns: i64) {
@@ -39,15 +40,13 @@ impl TimeAlive {
 
 impl Time for TimeAlive {
     fn timestamp_ns(&self) -> i64 {
-        SystemTime::now()
-            .duration_since(self.start)
-            .unwrap()
-            .as_nanos() as i64
+        Instant::now().duration_since(self.start).as_nanos() as i64
     }
 }
 
 struct Dev {
     dev: Bme680<linux_embedded_hal::I2cdev, linux_embedded_hal::Delay>,
+    measurement_available_after: Option<Instant>,
 }
 
 impl Dev {
@@ -55,6 +54,7 @@ impl Dev {
         let i2c = I2cdev::new("/dev/i2c-1")?;
         Ok(Dev {
             dev: Bme680::init(i2c, Delay {}, I2CAddress::Secondary).map_err(Bme680Error)?,
+            measurement_available_after: None,
         })
     }
 }
@@ -64,10 +64,10 @@ impl BmeSensor for Dev {
         linux_embedded_hal::i2cdev::linux::LinuxI2CError,
         linux_embedded_hal::i2cdev::linux::LinuxI2CError,
     >;
-    fn perform_measurement(
+    fn start_measurement(
         &mut self,
         settings: &BmeSettingsHandle,
-    ) -> Result<Vec<BmeOutput>, Self::Error> {
+    ) -> Result<std::time::Duration, Self::Error> {
         let settings = SettingsBuilder::new()
             .with_humidity_oversampling(OversamplingSetting::from_u8(
                 settings.humidity_oversampling(),
@@ -92,26 +92,36 @@ impl BmeSensor for Dev {
         self.dev
             .set_sensor_mode(PowerMode::ForcedMode)
             .map_err(Bme680Error)?;
-        std::thread::sleep(profile_duration);
-        let (data, _state) = self.dev.get_sensor_data().map_err(Bme680Error)?;
-        Ok(vec![
-            BmeOutput {
-                sensor: PhysicalSensorInput::Temperature,
-                signal: data.temperature_celsius(),
-            },
-            BmeOutput {
-                sensor: PhysicalSensorInput::Pressure,
-                signal: data.pressure_hpa(),
-            },
-            BmeOutput {
-                sensor: PhysicalSensorInput::Humidity,
-                signal: data.humidity_percent(),
-            },
-            BmeOutput {
-                sensor: PhysicalSensorInput::GasResistor,
-                signal: data.gas_resistance_ohm() as f32,
-            },
-        ])
+        self.measurement_available_after = Some(std::time::Instant::now() + profile_duration);
+        Ok(profile_duration)
+    }
+
+    fn get_measurement(&mut self) -> nb::Result<Vec<BmeOutput>, Self::Error> {
+        match self.measurement_available_after {
+            None => panic!("Mast call start_measurement before get_measurement."),
+            Some(instant) if instant > std::time::Instant::now() => Err(nb::Error::WouldBlock),
+            _ => {
+                let (data, _state) = self.dev.get_sensor_data().map_err(Bme680Error)?;
+                Ok(vec![
+                    BmeOutput {
+                        sensor: PhysicalSensorInput::Temperature,
+                        signal: data.temperature_celsius(),
+                    },
+                    BmeOutput {
+                        sensor: PhysicalSensorInput::Pressure,
+                        signal: data.pressure_hpa(),
+                    },
+                    BmeOutput {
+                        sensor: PhysicalSensorInput::Humidity,
+                        signal: data.humidity_percent(),
+                    },
+                    BmeOutput {
+                        sensor: PhysicalSensorInput::GasResistor,
+                        signal: data.gas_resistance_ohm() as f32,
+                    },
+                ])
+            }
+        }
     }
 }
 
@@ -142,8 +152,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     ];
     bsec.update_subscription(&conf)?;
     loop {
-        let outputs = bsec.do_step()?;
-        for output in outputs.signals.iter() {
+        let duration = block!(bsec.start_next_measurement())?;
+        std::thread::sleep(duration);
+        let outputs = block!(bsec.process_last_measurement())?;
+        for output in outputs.iter() {
             println!(
                 "{}: {} ({:?})",
                 match output.sensor {
@@ -162,6 +174,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 output.accuracy,
             );
         }
-        time.wait(outputs.next_call);
+        time.wait(bsec.next_measurement());
     }
 }

@@ -76,6 +76,7 @@ dependencies = [
  "bindgen",
  "bme680",
  "linux-embedded-hal",
+ "nb 1.0.0",
  "serial_test",
 ]
 

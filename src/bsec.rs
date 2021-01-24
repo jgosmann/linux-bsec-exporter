@@ -2,6 +2,7 @@ use self::ffi::*;
 use std::collections::HashSet;
 use std::convert::{From, TryFrom, TryInto};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 static BSEC_IN_USE: AtomicBool = AtomicBool::new(false);
 
@@ -45,16 +46,15 @@ pub struct BmeOutput {
 
 pub trait BmeSensor {
     type Error;
-    fn perform_measurement(
-        &mut self,
-        settings: &BmeSettingsHandle,
-    ) -> Result<Vec<BmeOutput>, Self::Error>;
+    fn start_measurement(&mut self, settings: &BmeSettingsHandle) -> Result<Duration, Self::Error>;
+    fn get_measurement(&mut self) -> nb::Result<Vec<BmeOutput>, Self::Error>;
 }
 
 pub struct Bsec<'t, S: BmeSensor, T: Time> {
     bme: S,
     subscribed: HashSet<VirtualSensorOutput>,
     ulp_plus_queue: HashSet<VirtualSensorOutput>,
+    next_measurement: i64,
     time: &'t T,
 }
 
@@ -68,6 +68,7 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
                 bme,
                 subscribed: HashSet::new(),
                 ulp_plus_queue: HashSet::new(),
+                next_measurement: time.timestamp_ns(),
                 time,
             })
         } else {
@@ -119,8 +120,11 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
             .filter_map(|x| RequiredSensorSettings::try_from(x).ok())
             .collect())
     }
+    pub fn next_measurement(&self) -> i64 {
+        self.next_measurement
+    }
 
-    pub fn do_step(&mut self) -> Result<Output, Error<S::Error>> {
+    pub fn start_next_measurement(&mut self) -> nb::Result<Duration, Error<S::Error>> {
         let mut bme_settings = bsec_bme_settings_t {
             next_call: 0,
             process_data: 0,
@@ -133,20 +137,25 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
             trigger_measurement: 0,
         };
         unsafe {
-            bsec_sensor_control(self.time.timestamp_ns(), &mut bme_settings).into_result()?;
+            bsec_sensor_control(self.time.timestamp_ns(), &mut bme_settings)
+                .into_result()
+                .map_err(Error::BsecError)?;
         }
+        self.next_measurement = bme_settings.next_call;
         if bme_settings.trigger_measurement != 1 {
-            return Ok(Output {
-                next_call: bme_settings.next_call,
-                signals: vec![],
-            });
+            return Err(nb::Error::WouldBlock);
         }
-        let inputs = self
+        self.bme
+            .start_measurement(&BmeSettingsHandle::new(&bme_settings))
+            .map_err(Error::BmeSensorError)
+            .map_err(nb::Error::Other)
+    }
+    pub fn process_last_measurement(&mut self) -> nb::Result<Vec<OutputSignal>, Error<S::Error>> {
+        let time_stamp = self.time.timestamp_ns(); // FIXME provide timestamp closer to measurement?
+        let inputs: Vec<bsec_input_t> = self
             .bme
-            .perform_measurement(&BmeSettingsHandle::new(&bme_settings))
-            .map_err(Error::BmeSensorError)?;
-        let time_stamp = self.time.timestamp_ns();
-        let inputs: Vec<bsec_input_t> = inputs
+            .get_measurement()
+            .map_err(|e| e.map(Error::BmeSensorError))?
             .iter()
             .map(|o| bsec_input_t {
                 time_stamp,
@@ -180,7 +189,8 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
                 outputs.as_mut_ptr(),
                 &mut num_outputs,
             )
-            .into_result()?;
+            .into_result()
+            .map_err(Error::BsecError)?;
         }
 
         let signals: Result<Vec<OutputSignal>, Error<S::Error>> = outputs
@@ -188,10 +198,7 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
             .take(num_outputs.into())
             .map(|x| OutputSignal::try_from(x).map_err(Error::<S::Error>::from))
             .collect();
-        Ok(Output {
-            next_call: bme_settings.next_call,
-            signals: signals?,
-        })
+        Ok(signals?)
     }
 
     pub fn get_state(&self) -> Result<Vec<u8>, Error<S::Error>> {
@@ -712,10 +719,10 @@ mod tests {
     use std::collections::HashMap;
 
     struct FakeBmeSensor {
-        measurement: Result<Vec<BmeOutput>, ()>,
+        measurement: nb::Result<Vec<BmeOutput>, ()>,
     }
     impl FakeBmeSensor {
-        fn new(measurement: Result<Vec<BmeOutput>, ()>) -> Self {
+        fn new(measurement: nb::Result<Vec<BmeOutput>, ()>) -> Self {
             Self { measurement }
         }
     }
@@ -726,10 +733,13 @@ mod tests {
     }
     impl BmeSensor for FakeBmeSensor {
         type Error = ();
-        fn perform_measurement(
+        fn start_measurement(
             &mut self,
             _: &BmeSettingsHandle<'_>,
-        ) -> Result<std::vec::Vec<BmeOutput>, ()> {
+        ) -> Result<std::time::Duration, ()> {
+            Ok(std::time::Duration::new(0, 0))
+        }
+        fn get_measurement(&mut self) -> nb::Result<Vec<BmeOutput>, ()> {
             self.measurement.clone()
         }
     }
@@ -742,6 +752,11 @@ mod tests {
         fn timestamp_ns(&self) -> i64 {
             *self.timestamp_ns.borrow_mut() += 1;
             *self.timestamp_ns.borrow()
+        }
+    }
+    impl FakeTime {
+        fn advance_by(&self, duration: Duration) {
+            *self.timestamp_ns.borrow_mut() += duration.as_nanos() as i64;
         }
     }
 
@@ -798,11 +813,12 @@ mod tests {
         ])
         .unwrap();
 
-        let outputs = bsec.do_step().unwrap();
-        assert_eq!(outputs.next_call, 3_000_000_001);
+        time.advance_by(bsec.start_next_measurement().unwrap());
+        let outputs = bsec.process_last_measurement().unwrap();
+        assert!(bsec.next_measurement() >= 3_000_000_000);
 
         let signals: HashMap<VirtualSensorOutput, &OutputSignal> =
-            outputs.signals.iter().map(|s| (s.sensor, s)).collect();
+            outputs.iter().map(|s| (s.sensor, s)).collect();
         assert_eq!(
             signals
                 .get(&VirtualSensorOutput::RawTemperature)
