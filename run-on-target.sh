@@ -2,6 +2,9 @@
 
 set -o errexit -o nounset -o pipefail
 
-scp "$2" "$1":/tmp
-filename=`basename "$2"`
-ssh "$1" -tt -C "/tmp/$filename"
+host="$1"
+path="$2"
+shift 2
+scp "$path" "$host":/tmp
+filename=`basename "$path"`
+ssh "$host" -tt -C "/tmp/$filename $@"
