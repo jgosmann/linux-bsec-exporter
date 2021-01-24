@@ -78,7 +78,7 @@ impl<'t, S: BmeSensor, T: Time> Bsec<'t, S, T> {
 
     pub fn update_subscription(
         &mut self,
-        requested_outputs: &Vec<RequestedSensorConfiguration>,
+        requested_outputs: &[RequestedSensorConfiguration],
     ) -> Result<Vec<RequiredSensorSettings>, Error<S::Error>> {
         let bsec_requested_outputs: Vec<bsec_sensor_configuration_t> =
             requested_outputs.iter().map(From::from).collect();
@@ -793,7 +793,7 @@ mod tests {
             },
         ]));
         let mut bsec = Bsec::init(sensor, &time).unwrap();
-        bsec.update_subscription(&vec![
+        bsec.update_subscription(&[
             RequestedSensorConfiguration {
                 sample_rate: SampleRate::Lp,
                 sensor: VirtualSensorOutput::RawTemperature,
@@ -819,30 +819,36 @@ mod tests {
 
         let signals: HashMap<VirtualSensorOutput, &OutputSignal> =
             outputs.iter().map(|s| (s.sensor, s)).collect();
-        assert_eq!(
-            signals
+        assert!(
+            (signals
                 .get(&VirtualSensorOutput::RawTemperature)
                 .unwrap()
-                .signal,
-            22.
+                .signal
+                - 22.)
+                .abs()
+                < f64::EPSILON
         );
-        assert_eq!(
-            signals
+        assert!(
+            (signals
                 .get(&VirtualSensorOutput::RawHumidity)
                 .unwrap()
-                .signal,
-            40.
+                .signal
+                - 40.)
+                .abs()
+                < f64::EPSILON
         );
-        assert_eq!(
-            signals
+        assert!(
+            (signals
                 .get(&VirtualSensorOutput::RawPressure)
                 .unwrap()
-                .signal,
-            1000.
+                .signal
+                - 1000.)
+                .abs()
+                < f64::EPSILON
         );
-        assert_eq!(
-            signals.get(&VirtualSensorOutput::RawGas).unwrap().signal,
-            6000.
+        assert!(
+            (signals.get(&VirtualSensorOutput::RawGas).unwrap().signal - 6000.).abs()
+                < f64::EPSILON
         );
     }
 
