@@ -9,6 +9,7 @@ use bme680_metrics_exporter::bsec::{
     BmeOutput, BmeSensor, BmeSettingsHandle, Bsec, PhysicalSensorInput,
     RequestedSensorConfiguration, SampleRate, Time, VirtualSensorOutput,
 };
+use bme680_metrics_exporter::monitor::Monitor;
 use linux_embedded_hal::{Delay, I2cdev};
 
 #[derive(Debug)]
@@ -125,9 +126,16 @@ impl BmeSensor for Dev {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let time = TimeAlive::new();
-    let mut bsec = Bsec::init(Dev::new()?, &time)?;
+#[macro_use]
+extern crate lazy_static;
+
+lazy_static! {
+    static ref TIME: TimeAlive = TimeAlive::new();
+}
+
+#[tokio::main(flavor = "current_thread")]
+pub async fn main() -> Result<(), Box<dyn Error>> {
+    let mut bsec = Bsec::init(Dev::new()?, &*TIME)?;
     let conf = vec![
         RequestedSensorConfiguration {
             sample_rate: SampleRate::Lp,
@@ -151,29 +159,36 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     ];
     bsec.update_subscription(&conf)?;
-    loop {
-        let duration = block!(bsec.start_next_measurement())?;
-        std::thread::sleep(duration);
-        let outputs = block!(bsec.process_last_measurement())?;
-        for output in outputs.iter() {
-            println!(
-                "{}: {} ({:?})",
-                match output.sensor {
-                    VirtualSensorOutput::SensorHeatCompensatedHumidity => {
-                        "Humidity (%)"
-                    }
-                    VirtualSensorOutput::SensorHeatCompensatedTemperature => {
-                        "Temp (°C)"
-                    }
-                    VirtualSensorOutput::Iaq => "IAQ",
-                    VirtualSensorOutput::Co2Equivalent => "CO2",
-                    VirtualSensorOutput::RawPressure => "Pressure (hPa)",
-                    _ => "?",
-                },
-                output.signal,
-                output.accuracy,
-            );
-        }
-        time.wait(bsec.next_measurement());
-    }
+    let local = tokio::task::LocalSet::new();
+
+    local
+        .run_until(async move {
+            let mut monitor = Monitor::start(bsec, &*TIME).await.unwrap();
+            loop {
+                monitor.current.changed().await.unwrap();
+                let outputs = monitor.current.borrow();
+                for output in outputs.iter() {
+                    println!(
+                        "{}: {} ({:?})",
+                        match output.sensor {
+                            VirtualSensorOutput::SensorHeatCompensatedHumidity => {
+                                "Humidity (%)"
+                            }
+                            VirtualSensorOutput::SensorHeatCompensatedTemperature => {
+                                "Temp (°C)"
+                            }
+                            VirtualSensorOutput::Iaq => "IAQ",
+                            VirtualSensorOutput::Co2Equivalent => "CO2",
+                            VirtualSensorOutput::RawPressure => "Pressure (hPa)",
+                            _ => "?",
+                        },
+                        output.signal,
+                        output.accuracy,
+                    );
+                }
+            }
+        })
+        .await;
+
+    Ok(())
 }

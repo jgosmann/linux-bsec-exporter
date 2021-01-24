@@ -7,9 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0.38"
 bme680 = "0.5.1"
+lazy_static = "1.4.0"
 linux-embedded-hal = "0.3.0"
 nb = "1.0.0"
+tokio = { version = "1.1.0", features = ["macros", "sync", "rt", "time"] }
 
 [build-dependencies]
 bindgen = "0.56.0"
