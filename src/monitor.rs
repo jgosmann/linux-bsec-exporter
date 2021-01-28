@@ -1,10 +1,11 @@
 use super::bsec::{self, BmeSensor, Bsec, OutputSignal, Time};
 use anyhow::Result;
 use nb::block;
+use std::future::{self, Future};
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 pub trait PersistState {
     type Error;
@@ -12,11 +13,16 @@ pub trait PersistState {
     fn save_state(&mut self, state: &[u8]) -> Result<(), Self::Error>;
 }
 
+pub trait Sleep {
+    type SleepFuture: Future;
+    fn sleep(&self, duration: Duration) -> Self::SleepFuture;
+}
+
 pub struct Monitor<S, P, T>
 where
     S: BmeSensor + 'static,
     P: PersistState + 'static,
-    T: Time + 'static,
+    T: Time + Sleep + 'static,
     P::Error: std::error::Error + Send + Sync + 'static,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
@@ -29,18 +35,11 @@ impl<S, P, T> Monitor<S, P, T>
 where
     S: BmeSensor + 'static,
     P: PersistState + 'static,
-    T: Time + 'static,
+    T: Time + Sleep + 'static,
     P::Error: std::error::Error + Send + Sync + 'static,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
-    pub async fn start(bsec: Bsec<S, T, Arc<T>>, persistence: P, time: Arc<T>) -> Result<Self>
-    where
-        S: BmeSensor + 'static,
-        P: PersistState + 'static,
-        T: Time + 'static,
-        P::Error: std::error::Error + Send + Sync + 'static,
-        S::Error: std::error::Error + Send + Sync + 'static,
-    {
+    pub async fn start(bsec: Bsec<S, T, Arc<T>>, persistence: P, time: Arc<T>) -> Result<Self> {
         let mut bsec = bsec;
         let (set_current, current) =
             watch::channel(Self::next_measurement(&mut bsec, time.clone()).await?);
@@ -65,17 +64,11 @@ where
         time: Arc<T>,
         set_current: watch::Sender<Vec<OutputSignal>>,
         shutdown_requested: oneshot::Receiver<()>,
-    ) -> Result<(Bsec<S, T, Arc<T>>, P)>
-    where
-        S: BmeSensor + 'static,
-        P: PersistState + 'static,
-        T: Time,
-        P::Error: std::error::Error + Send + Sync + 'static,
-        S::Error: std::error::Error + Send + Sync + 'static,
-    {
+    ) -> Result<(Bsec<S, T, Arc<T>>, P)> {
         let mut bsec = bsec;
         let mut persistence = persistence;
         let mut shutdown_requested = shutdown_requested;
+        let mut last_state_save = time.timestamp_ns();
 
         if let Some(state) = persistence.load_state()? {
             bsec.set_state(&state)?;
@@ -83,6 +76,11 @@ where
 
         while shutdown_requested.try_recv().is_err() {
             set_current.send(Self::next_measurement(&mut bsec, time.clone()).await?)?;
+            if time.timestamp_ns() - last_state_save >= 60_000_000_000 {
+                last_state_save = time.timestamp_ns();
+                persistence.save_state(&bsec.get_state()?)?;
+            }
+            tokio::task::yield_now().await;
         }
 
         persistence.save_state(&bsec.get_state()?)?;
@@ -96,10 +94,11 @@ where
     ) -> Result<Vec<OutputSignal>, bsec::Error<S::Error>> {
         let sleep_duration = bsec.next_measurement() - time.timestamp_ns();
         if sleep_duration > 0 {
-            sleep(Duration::from_nanos(sleep_duration as u64)).await;
+            time.sleep(Duration::from_nanos(sleep_duration as u64))
+                .await;
         }
         let duration = block!(bsec.start_next_measurement())?;
-        sleep(duration).await;
+        time.sleep(duration).await;
         block!(bsec.process_last_measurement())
     }
 
@@ -119,25 +118,16 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::cell::RefCell;
-    use std::time::Instant;
+    use std::future::Ready;
 
-    struct TimeAlive {
-        start: Instant,
-    }
-
-    impl Default for TimeAlive {
-        fn default() -> Self {
-            TimeAlive {
-                start: Instant::now(),
-            }
+    impl Sleep for FakeTime {
+        type SleepFuture = Ready<()>;
+        fn sleep(&self, duration: Duration) -> Self::SleepFuture {
+            self.advance_by(duration);
+            future::ready(())
         }
     }
 
-    impl Time for TimeAlive {
-        fn timestamp_ns(&self) -> i64 {
-            Instant::now().duration_since(self.start).as_nanos() as i64
-        }
-    }
     #[derive(Default)]
     struct MockPersistState {
         pub state: Arc<RefCell<Option<Vec<u8>>>>,
@@ -155,10 +145,24 @@ mod tests {
         }
     }
 
+    fn create_minimal_subscribed_bsec<T: Time>(time: Arc<T>) -> Bsec<FakeBmeSensor, T, Arc<T>> {
+        let bme = FakeBmeSensor::new(Ok(vec![BmeOutput {
+            sensor: PhysicalSensorInput::Temperature,
+            signal: 22.,
+        }]));
+        let mut bsec = Bsec::init(bme, time).unwrap();
+        bsec.update_subscription(&[RequestedSensorConfiguration {
+            sample_rate: SampleRate::Continuous,
+            sensor: VirtualSensorOutput::RawTemperature,
+        }])
+        .unwrap();
+        bsec
+    }
+
     #[tokio::test]
     #[serial]
     async fn smoke_test() {
-        let time = Arc::new(TimeAlive::default());
+        let time = Arc::new(FakeTime::default());
         let bme = FakeBmeSensor::new(Ok(vec![BmeOutput {
             sensor: PhysicalSensorInput::Temperature,
             signal: 22.,
@@ -184,13 +188,13 @@ mod tests {
                     assert!((outputs[0].signal - 22.) < f64::EPSILON);
                 }
 
-                monitor.current.changed().await.unwrap();
-                {
+                let _ = monitor.current.changed().await.and_then(|_| {
                     let outputs = monitor.current.borrow();
                     assert_eq!(outputs.len(), 1);
                     assert_eq!(outputs[0].sensor, VirtualSensorOutput::RawTemperature);
                     assert!((outputs[0].signal - 22.) < f64::EPSILON);
-                }
+                    Ok(())
+                });
 
                 monitor.stop().await.unwrap();
             })
@@ -200,17 +204,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn loads_and_persists_state() {
-        let time = Arc::new(TimeAlive::default());
-        let bme = FakeBmeSensor::new(Ok(vec![BmeOutput {
-            sensor: PhysicalSensorInput::Temperature,
-            signal: 22.,
-        }]));
-        let mut bsec = Bsec::init(bme, time.clone()).unwrap();
-        bsec.update_subscription(&[RequestedSensorConfiguration {
-            sample_rate: SampleRate::Continuous,
-            sensor: VirtualSensorOutput::RawTemperature,
-        }])
-        .unwrap();
+        let time = Arc::new(FakeTime::default());
+        let bsec = create_minimal_subscribed_bsec(time.clone());
 
         let state = Arc::new(RefCell::new(Some(bsec.get_state().unwrap())));
         let persist_state = MockPersistState {
@@ -227,6 +222,36 @@ mod tests {
                 *state.borrow_mut() = None;
                 let (bsec, _) = monitor.stop().await.unwrap();
                 assert_eq!(*state.borrow(), Some(bsec.get_state().unwrap()));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn autosaves_state() {
+        let time = Arc::new(FakeTime::default());
+        let bsec = create_minimal_subscribed_bsec(time.clone());
+
+        let state = Arc::new(RefCell::new(None));
+        let persist_state = MockPersistState {
+            state: state.clone(),
+        };
+
+        let local = tokio::task::LocalSet::new();
+
+        local
+            .run_until(async move {
+                let monitor = Monitor::start(bsec, persist_state, time.clone())
+                    .await
+                    .unwrap();
+
+                for _ in 0..70 {
+                    time.sleep(Duration::from_secs(1)).await;
+                    tokio::task::yield_now().await
+                }
+
+                assert!(state.borrow().is_some());
+                monitor.stop().await.unwrap();
             })
             .await;
     }

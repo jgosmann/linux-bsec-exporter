@@ -1,4 +1,5 @@
 use bme680_metrics_exporter::monitor::PersistState;
+use bme680_metrics_exporter::monitor::Sleep;
 use std::error::Error;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -39,6 +40,13 @@ impl Default for TimeAlive {
 impl Time for TimeAlive {
     fn timestamp_ns(&self) -> i64 {
         Instant::now().duration_since(self.start).as_nanos() as i64
+    }
+}
+
+impl Sleep for TimeAlive {
+    type SleepFuture = tokio::time::Sleep;
+    fn sleep(&self, duration: Duration) -> Self::SleepFuture {
+        tokio::time::sleep(duration)
     }
 }
 
