@@ -1,3 +1,4 @@
+use bme680_metrics_exporter::monitor::PersistState;
 use std::error::Error;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -122,6 +123,18 @@ impl BmeSensor for Dev {
     }
 }
 
+#[derive(Default)]
+pub struct NoPersistState {}
+impl PersistState for NoPersistState {
+    type Error = std::convert::Infallible;
+    fn load_state(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+        Ok(None)
+    }
+    fn save_state(&mut self, _: &[u8]) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
 #[macro_use]
 extern crate lazy_static;
 
@@ -159,7 +172,9 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
 
     local
         .run_until(async move {
-            let mut monitor = Monitor::start(bsec, TIME.clone()).await.unwrap();
+            let mut monitor = Monitor::start(bsec, NoPersistState::default(), TIME.clone())
+                .await
+                .unwrap();
             loop {
                 monitor.current.changed().await.unwrap();
                 let outputs = monitor.current.borrow();
