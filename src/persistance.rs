@@ -21,7 +21,7 @@ pub struct StateFile<P: AsRef<Path>> {
 }
 
 impl<P: AsRef<Path>> StateFile<P> {
-    fn new(path: P) -> Self {
+    pub fn new(path: P) -> Self {
         Self { path }
     }
 }

@@ -328,10 +328,10 @@ impl TryFrom<&bsec_output_t> for OutputSignal {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Accuracy {
-    Unreliable,
-    LowAccuracy,
-    MediumAccuracy,
-    HighAccuracy,
+    Unreliable = 0,
+    LowAccuracy = 1,
+    MediumAccuracy = 2,
+    HighAccuracy = 3,
 }
 
 impl TryFrom<u8> for Accuracy {
