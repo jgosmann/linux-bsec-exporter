@@ -13,7 +13,8 @@ lazy_static = "1.4.0"
 linux-embedded-hal = "0.3.0"
 nb = "1.0.0"
 prometheus = "0.11.0"
-tokio = { version = "1.1.0", features = ["macros", "sync", "rt", "time"] }
+tide = "0.16.0"
+tokio = { version = "1.1.0", features = ["macros", "sync", "rt", "signal", "time"] }
 
 [build-dependencies]
 bindgen = "0.56.0"

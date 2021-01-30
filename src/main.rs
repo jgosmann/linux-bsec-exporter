@@ -1,11 +1,16 @@
 use bme680_metrics_exporter::bsec::Accuracy;
+use bme680_metrics_exporter::bsec::BmeSensor;
 use bme680_metrics_exporter::bsec::OutputSignal;
+use bme680_metrics_exporter::bsec::Time;
+use bme680_metrics_exporter::monitor::PersistState;
+use bme680_metrics_exporter::monitor::Sleep;
 use prometheus::proto::MetricFamily;
 use prometheus::{Encoder, Gauge, Opts, Registry};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::sync::Arc;
+use tokio::signal::unix::{signal, SignalKind};
 
 use bme680_metrics_exporter::bme680::Dev;
 use bme680_metrics_exporter::bsec::{
@@ -42,6 +47,7 @@ impl<'a> GaugeUnit<'a> {
     }
 }
 
+#[derive(Clone)]
 struct BsecGauge {
     value: Gauge,
     accuracy: Gauge,
@@ -149,6 +155,7 @@ impl TryFrom<&VirtualSensorOutput> for BsecGauge {
     }
 }
 
+#[derive(Clone)]
 struct BsecGaugeRegistry {
     registry: Registry,
     sensor_gauge_map: HashMap<VirtualSensorOutput, BsecGauge>,
@@ -195,6 +202,46 @@ const ACTIVE_SENSORS: [VirtualSensorOutput; 13] = [
     VirtualSensorOutput::GasPercentage,
 ];
 
+async fn serve_metrics(req: tide::Request<BsecGaugeRegistry>) -> tide::Result {
+    let mut buffer = vec![];
+    let encoder = prometheus::TextEncoder::new();
+    encoder.encode(&req.state().gather(), &mut buffer)?;
+    Ok(format!("{}", String::from_utf8(buffer)?).into())
+}
+
+async fn handle_sigterm(request_shutdown: tokio::sync::oneshot::Sender<()>) -> std::io::Result<()> {
+    signal(SignalKind::terminate())?.recv().await;
+    let _ = request_shutdown.send(());
+    Ok(())
+}
+
+async fn run_monitoring(
+    bsec: Bsec<Dev, TimeAlive, Arc<TimeAlive>>,
+    registry: BsecGaugeRegistry,
+) -> anyhow::Result<()> {
+    let mut monitor = Monitor::start(
+        bsec,
+        StateFile::new("/var/lib/bsec-metrics-exporter/state.bin"),
+        TIME.clone(),
+    )
+    .await?;
+
+    tokio::task::spawn_local(handle_sigterm(monitor.request_shutdown));
+
+    println!("BSEC monitoring started.");
+    while let Ok(_) = monitor.current.changed().await {
+        let outputs = monitor.current.borrow();
+        for output in outputs.iter() {
+            registry.set(output);
+        }
+    }
+
+    println!("Waiting for BSEC monitoring shutdown ...");
+    monitor.join_handle.await??;
+    println!("BSEC monitoring shutdown complete.");
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     let mut bsec = Bsec::init(Dev::new()?, TIME.clone())?;
@@ -209,28 +256,16 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let local = tokio::task::LocalSet::new();
     let registry = BsecGaugeRegistry::new(&ACTIVE_SENSORS)?;
 
-    local
-        .run_until(async move {
-            let mut monitor = Monitor::start(
-                bsec,
-                StateFile::new("/var/lib/bsec-metrics-exporter/state.bin"),
-                TIME.clone(),
-            )
-            .await
-            .unwrap();
-            loop {
-                monitor.current.changed().await.unwrap();
-                let outputs = monitor.current.borrow();
-                for output in outputs.iter() {
-                    registry.set(output);
-                }
-                let mut buffer = vec![];
-                let encoder = prometheus::TextEncoder::new();
-                encoder.encode(&registry.gather(), &mut buffer).unwrap(); // FIXME
-                println!("{}", String::from_utf8(buffer).unwrap());
-            }
-        })
-        .await;
+    let monitoring = local.run_until(run_monitoring(bsec, registry.clone()));
+
+    let mut app = tide::with_state(registry);
+    app.at("/metrics").get(serve_metrics);
+    println!("Spawning server ...");
+    let server = app.listen("0.0.0.0:9118"); // FIXME spawn to allow parallelization?
+
+    let (_, server) = tokio::join!(monitoring, server);
+    server?;
+    println!("Shutdown.");
 
     Ok(())
 }

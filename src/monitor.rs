@@ -27,8 +27,8 @@ where
     S::Error: std::error::Error + Send + Sync + 'static,
 {
     pub current: watch::Receiver<Vec<OutputSignal>>,
-    request_shutdown: oneshot::Sender<()>,
-    join_handle: JoinHandle<Result<(Bsec<S, T, Arc<T>>, P)>>,
+    pub request_shutdown: oneshot::Sender<()>,
+    pub join_handle: JoinHandle<Result<(Bsec<S, T, Arc<T>>, P)>>,
 }
 
 impl<S, P, T> Monitor<S, P, T>
