@@ -9,6 +9,8 @@ use prometheus::{Encoder, Gauge, Opts, Registry};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::error::Error;
+use std::fs::File;
+use std::io::Read;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -245,6 +247,9 @@ async fn run_monitoring(
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     let mut bsec = Bsec::init(Dev::new()?, TIME.clone())?;
+    let mut config = Vec::<u8>::new();
+    File::open("/etc/bsec-metrics-exporter/bsec_iaq.config")?.read_to_end(&mut config)?;
+    bsec.set_configuration(&config[4..])?; // First four bytes give config length
     let conf: Vec<_> = ACTIVE_SENSORS
         .iter()
         .map(|&sensor| RequestedSensorConfiguration {
