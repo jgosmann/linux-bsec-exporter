@@ -266,10 +266,11 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let mut app = tide::with_state(registry);
     app.at("/metrics").get(serve_metrics);
     println!("Spawning server ...");
-    let server = app.listen("0.0.0.0:9118"); // FIXME spawn to allow parallelization?
+    tokio::spawn(async move {
+        app.listen("0.0.0.0:9118").await // FIXME spawn to allow parallelization?
+    });
 
-    let (_, server) = tokio::join!(monitoring, server);
-    server?;
+    monitoring.await?;
     println!("Shutdown.");
 
     Ok(())
