@@ -1,4 +1,4 @@
-use self::ffi::*;
+use libalgobsec_sys::*;
 use core::borrow::Borrow;
 use core::convert::{From, TryFrom, TryInto};
 use core::fmt::Debug;
@@ -90,8 +90,8 @@ impl<S: BmeSensor, T: Time, B: Borrow<T>> Bsec<S, T, B> {
         let mut required_sensor_settings = [bsec_sensor_configuration_t {
             sample_rate: 0.,
             sensor_id: 0,
-        }; ffi::BSEC_MAX_PHYSICAL_SENSOR as usize];
-        let mut n_required_sensor_settings = ffi::BSEC_MAX_PHYSICAL_SENSOR as u8;
+        }; BSEC_MAX_PHYSICAL_SENSOR as usize];
+        let mut n_required_sensor_settings = BSEC_MAX_PHYSICAL_SENSOR as u8;
         unsafe {
             bsec_update_subscription(
                 bsec_requested_outputs.as_ptr(),
@@ -701,13 +701,6 @@ impl From<bsec_library_return_t> for BsecError {
             return_code => Unknown(return_code),
         }
     }
-}
-
-pub mod ffi {
-    #![allow(non_camel_case_types)]
-    #![allow(non_upper_case_globals)]
-
-    include!(concat!(env!("OUT_DIR"), "/bsec_bindings.rs"));
 }
 
 #[cfg(test)]
