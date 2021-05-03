@@ -1,6 +1,7 @@
 use self::ffi::*;
 use core::borrow::Borrow;
 use core::convert::{From, TryFrom, TryInto};
+use core::fmt::Debug;
 use core::hash::Hash;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -47,7 +48,7 @@ pub struct BmeOutput {
 }
 
 pub trait BmeSensor {
-    type Error;
+    type Error: Debug;
     fn start_measurement(&mut self, settings: &BmeSettingsHandle) -> Result<Duration, Self::Error>;
     fn get_measurement(&mut self) -> nb::Result<Vec<BmeOutput>, Self::Error>;
 }
@@ -546,7 +547,7 @@ impl TryFrom<u8> for VirtualSensorOutput {
 }
 
 #[derive(Clone, Debug)]
-pub enum Error<E> {
+pub enum Error<E: Debug> {
     ArgumentListTooLong,
     BsecAlreadyInUse,
     BsecError(BsecError),
@@ -554,22 +555,22 @@ pub enum Error<E> {
     BmeSensorError(E),
 }
 
-impl<E> std::fmt::Display for Error<E> {
+impl<E: Debug> std::fmt::Display for Error<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         // TODO
-        f.write_fmt(format_args!("Error"))
+        f.write_fmt(format_args!("Error {:?}", self))
     }
 }
 
 impl<E: std::fmt::Debug> std::error::Error for Error<E> {}
 
-impl<E> From<BsecError> for Error<E> {
+impl<E: Debug> From<BsecError> for Error<E> {
     fn from(bsec_error: BsecError) -> Self {
         Self::BsecError(bsec_error)
     }
 }
 
-impl<E> From<ConversionError> for Error<E> {
+impl<E: Debug> From<ConversionError> for Error<E> {
     fn from(conversion_error: ConversionError) -> Self {
         Self::ConversionError(conversion_error)
     }

@@ -246,10 +246,13 @@ async fn run_monitoring(
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
+    println!("Acquiring sensor ...");
     let mut bsec = Bsec::init(Dev::new()?, TIME.clone())?;
+    println!("Setting config ...");
     let mut config = Vec::<u8>::new();
     File::open("/etc/bsec-metrics-exporter/bsec_iaq.config")?.read_to_end(&mut config)?;
     bsec.set_configuration(&config[4..])?; // First four bytes give config length
+    println!("Sensor initialized.");
     let conf: Vec<_> = ACTIVE_SENSORS
         .iter()
         .map(|&sensor| RequestedSensorConfiguration {

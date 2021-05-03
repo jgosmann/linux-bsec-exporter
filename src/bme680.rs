@@ -12,7 +12,16 @@ pub struct Bme680Error<R, W>(bme680::Error<R, W>);
 
 impl<R: Debug, W: Debug> Display for Bme680Error<R, W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.write_fmt(format_args!("{:?}", self))
+        use bme680::Error::*;
+        match &self.0 {
+            I2CWrite(w) => f.write_fmt(format_args!("I2C write error: {:?}", w)),
+            I2CRead(r) => f.write_fmt(format_args!("I2C read error: {:?}", r)),
+            DeviceNotFound => f.write_str("DeviceNotFound/BME680_E_DEV_NOT_FOUND"),
+            InvalidLength => f.write_str("InvalidLength/BME680_E_INVALID_LENGTH"),
+            DefinePwrMode => f.write_str("DefinePwrMode/BME680_W_DEFINE_PWR_MODE"),
+            NoNewData => f.write_str("NoNewData/BME680_W_DEFINE_PWR_MODE"),
+            BoundaryCheckFailure(msg) => f.write_fmt(format_args!("BoundaryCheckFailure: {}", msg)),
+        }
     }
 }
 
