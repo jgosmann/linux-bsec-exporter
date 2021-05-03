@@ -30,6 +30,7 @@ impl<R: Debug, W: Debug> Error for Bme680Error<R, W> {}
 pub struct Dev {
     dev: Bme680<linux_embedded_hal::I2cdev, linux_embedded_hal::Delay>,
     measurement_available_after: Option<Instant>,
+    last_measured_temperature_celsius: f32,
 }
 
 impl Dev {
@@ -38,6 +39,7 @@ impl Dev {
         Ok(Dev {
             dev: Bme680::init(i2c, Delay {}, I2CAddress::Secondary).map_err(Bme680Error)?,
             measurement_available_after: None,
+            last_measured_temperature_celsius: 20.,
         })
     }
 }
@@ -65,8 +67,9 @@ impl BmeSensor for Dev {
             .with_gas_measurement(
                 Duration::from_millis(settings.heating_duration().into()),
                 settings.heater_temperature(),
-                25,
+                self.last_measured_temperature_celsius.round() as i8,
             )
+            .with_temperature_offset(0.)
             .build();
         self.dev
             .set_sensor_settings(settings)
@@ -85,6 +88,7 @@ impl BmeSensor for Dev {
             Some(instant) if instant > std::time::Instant::now() => Err(nb::Error::WouldBlock),
             _ => {
                 let (data, _state) = self.dev.get_sensor_data().map_err(Bme680Error)?;
+                self.last_measured_temperature_celsius = data.temperature_celsius();
                 Ok(vec![
                     BmeOutput {
                         sensor: PhysicalSensorInput::Temperature,
