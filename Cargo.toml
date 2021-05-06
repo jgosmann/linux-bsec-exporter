@@ -1,5 +1,6 @@
 [package]
-name = "bme680-metrics-exporter"
+name = "linux-bsec-exporter"
+description = "Export Bosch BSEC outputs to Prometheus."
 version = "0.1.0"
 authors = ["Jan Gosmann <jan@hyper-world.de>"]
 edition = "2018"

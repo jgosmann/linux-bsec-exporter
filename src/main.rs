@@ -9,10 +9,10 @@ use std::io::Read;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 
-use bme680_metrics_exporter::monitor::Monitor;
-use bme680_metrics_exporter::persistance::StateFile;
 use bsec::bme::bme680::Bme680Sensor;
 use bsec::clock::TimePassed;
+use linux_bsec_exporter::monitor::Monitor;
+use linux_bsec_exporter::persistance::StateFile;
 
 #[macro_use]
 extern crate lazy_static;

@@ -423,23 +423,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bme680-metrics-exporter"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bme680",
- "bsec",
- "lazy_static",
- "linux-embedded-hal",
- "nb 1.0.0",
- "prometheus",
- "serial_test",
- "tempfile",
- "tide",
- "tokio",
-]
-
-[[package]]
 name = "bsec"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1098,6 +1081,23 @@ checksum = "6f84d96438c15fcd6c3f244c8fce01d1e2b9c6b5623e9c711dc9286d8fc92d6a"
 dependencies = [
  "cfg-if 1.0.0",
  "winapi",
+]
+
+[[package]]
+name = "linux-bsec-exporter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bme680",
+ "bsec",
+ "lazy_static",
+ "linux-embedded-hal",
+ "nb 1.0.0",
+ "prometheus",
+ "serial_test",
+ "tempfile",
+ "tide",
+ "tokio",
 ]
 
 [[package]]
