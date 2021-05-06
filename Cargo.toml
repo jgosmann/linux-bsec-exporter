@@ -9,16 +9,15 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0.38"
 bme680 = "0.5.1"
+bsec = { version = "0.1.2", features = ["use-bme680"] }
 lazy_static = "1.4.0"
-libalgobsec-sys = "0.1.0"
 linux-embedded-hal = "0.3.0"
 nb = "1.0.0"
 prometheus = "0.11.0"
 tide = "0.16.0"
 tokio = { version = "1.1.0", features = ["macros", "sync", "rt", "signal", "time"] }
 
-[build-dependencies]
-bindgen = "0.56.0"
-
 [dev-dependencies]
 serial_test = "0.5.1"
+bsec = { version = "0.1.2", features = ["use-bme680", "test-support"] }
+tempfile = "3.2.0"

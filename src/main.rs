@@ -1,9 +1,4 @@
-use bme680_metrics_exporter::bsec::Accuracy;
-use bme680_metrics_exporter::bsec::BmeSensor;
-use bme680_metrics_exporter::bsec::OutputSignal;
-use bme680_metrics_exporter::bsec::Time;
-use bme680_metrics_exporter::monitor::PersistState;
-use bme680_metrics_exporter::monitor::Sleep;
+use linux_embedded_hal::{Delay, I2cdev};
 use prometheus::proto::MetricFamily;
 use prometheus::{Encoder, Gauge, Opts, Registry};
 use std::collections::HashMap;
@@ -14,19 +9,16 @@ use std::io::Read;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 
-use bme680_metrics_exporter::bme680::Dev;
-use bme680_metrics_exporter::bsec::{
-    Bsec, RequestedSensorConfiguration, SampleRate, VirtualSensorOutput,
-};
 use bme680_metrics_exporter::monitor::Monitor;
 use bme680_metrics_exporter::persistance::StateFile;
-use bme680_metrics_exporter::time::TimeAlive;
+use bsec::bme::bme680::Bme680Sensor;
+use bsec::clock::TimePassed;
 
 #[macro_use]
 extern crate lazy_static;
 
 lazy_static! {
-    static ref TIME: Arc<TimeAlive> = Arc::default();
+    static ref TIME: Arc<TimePassed> = Arc::default();
 }
 
 struct GaugeUnit<'a> {
@@ -81,17 +73,17 @@ impl BsecGauge {
         Ok(())
     }
 
-    pub fn set(&self, value: f64, accuracy: Accuracy) {
+    pub fn set(&self, value: f64, accuracy: bsec::Accuracy) {
         self.value.set(value);
         self.accuracy.set((accuracy as u8).into());
     }
 }
 
-impl TryFrom<&VirtualSensorOutput> for BsecGauge {
+impl TryFrom<&bsec::OutputKind> for BsecGauge {
     type Error = prometheus::Error;
 
-    fn try_from(sensor: &VirtualSensorOutput) -> Result<Self, Self::Error> {
-        use VirtualSensorOutput::*;
+    fn try_from(sensor: &bsec::OutputKind) -> Result<Self, Self::Error> {
+        use bsec::OutputKind::*;
         match sensor {
             Iaq => BsecGauge::new("iaq", "Indoor-air-quality estimate [0-500]", None),
             StaticIaq => BsecGauge::new("static_iaq", "Unscaled indoor-air-quality estimate", None),
@@ -160,11 +152,11 @@ impl TryFrom<&VirtualSensorOutput> for BsecGauge {
 #[derive(Clone)]
 struct BsecGaugeRegistry {
     registry: Registry,
-    sensor_gauge_map: HashMap<VirtualSensorOutput, BsecGauge>,
+    sensor_gauge_map: HashMap<bsec::OutputKind, BsecGauge>,
 }
 
 impl BsecGaugeRegistry {
-    pub fn new(sensors: &[VirtualSensorOutput]) -> prometheus::Result<Self> {
+    pub fn new(sensors: &[bsec::OutputKind]) -> prometheus::Result<Self> {
         let mut gauge_registry = Self {
             registry: Registry::new(),
             sensor_gauge_map: HashMap::with_capacity(sensors.len()),
@@ -178,7 +170,7 @@ impl BsecGaugeRegistry {
 
         Ok(gauge_registry)
     }
-    pub fn set(&self, output: &OutputSignal) {
+    pub fn set(&self, output: &bsec::Output) {
         if let Some(gauge) = self.sensor_gauge_map.get(&output.sensor) {
             gauge.set(output.signal, output.accuracy)
         }
@@ -188,20 +180,20 @@ impl BsecGaugeRegistry {
     }
 }
 
-const ACTIVE_SENSORS: [VirtualSensorOutput; 13] = [
-    VirtualSensorOutput::Iaq,
-    VirtualSensorOutput::StaticIaq,
-    VirtualSensorOutput::Co2Equivalent,
-    VirtualSensorOutput::BreathVocEquivalent,
-    VirtualSensorOutput::RawTemperature,
-    VirtualSensorOutput::RawPressure,
-    VirtualSensorOutput::RawHumidity,
-    VirtualSensorOutput::RawGas,
-    VirtualSensorOutput::StabilizationStatus,
-    VirtualSensorOutput::RunInStatus,
-    VirtualSensorOutput::SensorHeatCompensatedTemperature,
-    VirtualSensorOutput::SensorHeatCompensatedHumidity,
-    VirtualSensorOutput::GasPercentage,
+const ACTIVE_SENSORS: [bsec::OutputKind; 13] = [
+    bsec::OutputKind::Iaq,
+    bsec::OutputKind::StaticIaq,
+    bsec::OutputKind::Co2Equivalent,
+    bsec::OutputKind::BreathVocEquivalent,
+    bsec::OutputKind::RawTemperature,
+    bsec::OutputKind::RawPressure,
+    bsec::OutputKind::RawHumidity,
+    bsec::OutputKind::RawGas,
+    bsec::OutputKind::StabilizationStatus,
+    bsec::OutputKind::RunInStatus,
+    bsec::OutputKind::SensorHeatCompensatedTemperature,
+    bsec::OutputKind::SensorHeatCompensatedHumidity,
+    bsec::OutputKind::GasPercentage,
 ];
 
 async fn serve_metrics(req: tide::Request<BsecGaugeRegistry>) -> tide::Result {
@@ -217,8 +209,10 @@ async fn handle_sigterm(request_shutdown: tokio::sync::oneshot::Sender<()>) -> s
     Ok(())
 }
 
+type Dev = Bme680Sensor<linux_embedded_hal::I2cdev, linux_embedded_hal::Delay>;
+
 async fn run_monitoring(
-    bsec: Bsec<Dev, TimeAlive, Arc<TimeAlive>>,
+    bsec: bsec::Bsec<Dev, TimePassed, Arc<TimePassed>>,
     registry: BsecGaugeRegistry,
 ) -> anyhow::Result<()> {
     let mut monitor = Monitor::start(
@@ -247,7 +241,10 @@ async fn run_monitoring(
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     println!("Acquiring sensor ...");
-    let mut bsec = Bsec::init(Dev::new()?, TIME.clone())?;
+    let i2c = I2cdev::new("/dev/i2c-1")?;
+    let dev = bme680::Bme680::init(i2c, Delay {}, bme680::I2CAddress::Secondary).unwrap();
+    let sensor = bsec::bme::bme680::Bme680Sensor::new(dev, 20.);
+    let mut bsec = bsec::Bsec::init(sensor, TIME.clone())?;
     println!("Setting config ...");
     let mut config = Vec::<u8>::new();
     File::open("/etc/bsec-metrics-exporter/bsec_iaq.config")?.read_to_end(&mut config)?;
@@ -255,8 +252,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     println!("Sensor initialized.");
     let conf: Vec<_> = ACTIVE_SENSORS
         .iter()
-        .map(|&sensor| RequestedSensorConfiguration {
-            sample_rate: SampleRate::Lp,
+        .map(|&sensor| bsec::SubscriptionRequest {
+            sample_rate: bsec::SampleRate::Lp,
             sensor,
         })
         .collect();
@@ -264,7 +261,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let local = tokio::task::LocalSet::new();
     let registry = BsecGaugeRegistry::new(&ACTIVE_SENSORS)?;
 
-    let monitoring = local.run_until(run_monitoring(bsec, registry.clone()));
+    let _monitoring = local.run_until(run_monitoring(bsec, registry.clone()));
 
     let mut app = tide::with_state(registry);
     app.at("/metrics").get(serve_metrics);

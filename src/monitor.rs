@@ -1,7 +1,7 @@
-use super::bsec::{self, BmeSensor, Bsec, OutputSignal, Time};
 use anyhow::Result;
+use bsec::{self, bme::BmeSensor, clock::Clock, Bsec, Output};
 use nb::block;
-use std::future::{self, Future};
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
@@ -22,11 +22,11 @@ pub struct Monitor<S, P, T>
 where
     S: BmeSensor + 'static,
     P: PersistState + 'static,
-    T: Time + Sleep + 'static,
+    T: Clock + Sleep + 'static,
     P::Error: std::error::Error + Send + Sync + 'static,
-    S::Error: std::error::Error + Send + Sync + 'static,
+    S::Error: std::fmt::Debug + Send + Sync + 'static,
 {
-    pub current: watch::Receiver<Vec<OutputSignal>>,
+    pub current: watch::Receiver<Vec<Output>>,
     pub request_shutdown: oneshot::Sender<()>,
     pub join_handle: JoinHandle<Result<(Bsec<S, T, Arc<T>>, P)>>,
 }
@@ -35,9 +35,9 @@ impl<S, P, T> Monitor<S, P, T>
 where
     S: BmeSensor + 'static,
     P: PersistState + 'static,
-    T: Time + Sleep + 'static,
+    T: Clock + Sleep + 'static,
     P::Error: std::error::Error + Send + Sync + 'static,
-    S::Error: std::error::Error + Send + Sync + 'static,
+    S::Error: std::fmt::Debug + Send + Sync + 'static,
 {
     pub async fn start(bsec: Bsec<S, T, Arc<T>>, persistence: P, time: Arc<T>) -> Result<Self> {
         let mut bsec = bsec;
@@ -62,7 +62,7 @@ where
         bsec: Bsec<S, T, Arc<T>>,
         persistence: P,
         time: Arc<T>,
-        set_current: watch::Sender<Vec<OutputSignal>>,
+        set_current: watch::Sender<Vec<Output>>,
         shutdown_requested: oneshot::Receiver<()>,
     ) -> Result<(Bsec<S, T, Arc<T>>, P)> {
         let mut bsec = bsec;
@@ -91,7 +91,7 @@ where
     async fn next_measurement(
         bsec: &mut Bsec<S, T, Arc<T>>,
         time: Arc<T>,
-    ) -> Result<Vec<OutputSignal>, bsec::Error<S::Error>> {
+    ) -> Result<Vec<Output>, bsec::error::Error<S::Error>> {
         let sleep_duration = bsec.next_measurement() - time.timestamp_ns();
         if sleep_duration > 0 {
             time.sleep(Duration::from_nanos(sleep_duration as u64))
@@ -110,17 +110,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::bsec::tests::{FakeBmeSensor, FakeTime};
-    use super::bsec::{
-        BmeOutput, PhysicalSensorInput, RequestedSensorConfiguration, SampleRate,
-        VirtualSensorOutput,
-    };
     use super::*;
+    use bsec::bme::test_support::FakeBmeSensor;
+    use bsec::clock::test_support::FakeClock;
     use serial_test::serial;
     use std::cell::RefCell;
-    use std::future::Ready;
+    use std::future::{self, Ready};
 
-    impl Sleep for FakeTime {
+    impl Sleep for FakeClock {
         type SleepFuture = Ready<()>;
         fn sleep(&self, duration: Duration) -> Self::SleepFuture {
             self.advance_by(duration);
@@ -145,15 +142,15 @@ mod tests {
         }
     }
 
-    fn create_minimal_subscribed_bsec<T: Time>(time: Arc<T>) -> Bsec<FakeBmeSensor, T, Arc<T>> {
-        let bme = FakeBmeSensor::new(Ok(vec![BmeOutput {
-            sensor: PhysicalSensorInput::Temperature,
+    fn create_minimal_subscribed_bsec<C: Clock>(time: Arc<C>) -> Bsec<FakeBmeSensor, C, Arc<C>> {
+        let bme = FakeBmeSensor::new(Ok(vec![bsec::Input {
+            sensor: bsec::InputKind::Temperature,
             signal: 22.,
         }]));
         let mut bsec = Bsec::init(bme, time).unwrap();
-        bsec.update_subscription(&[RequestedSensorConfiguration {
-            sample_rate: SampleRate::Continuous,
-            sensor: VirtualSensorOutput::RawTemperature,
+        bsec.update_subscription(&[bsec::SubscriptionRequest {
+            sample_rate: bsec::SampleRate::Continuous,
+            sensor: bsec::OutputKind::RawTemperature,
         }])
         .unwrap();
         bsec
@@ -162,15 +159,15 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn smoke_test() {
-        let time = Arc::new(FakeTime::default());
-        let bme = FakeBmeSensor::new(Ok(vec![BmeOutput {
-            sensor: PhysicalSensorInput::Temperature,
+        let clock = Arc::new(FakeClock::new());
+        let bme = FakeBmeSensor::new(Ok(vec![bsec::Input {
+            sensor: bsec::InputKind::Temperature,
             signal: 22.,
         }]));
-        let mut bsec = Bsec::init(bme, time.clone()).unwrap();
-        bsec.update_subscription(&[RequestedSensorConfiguration {
-            sample_rate: SampleRate::Continuous,
-            sensor: VirtualSensorOutput::RawTemperature,
+        let mut bsec = Bsec::init(bme, clock.clone()).unwrap();
+        bsec.update_subscription(&[bsec::SubscriptionRequest {
+            sample_rate: bsec::SampleRate::Continuous,
+            sensor: bsec::OutputKind::RawTemperature,
         }])
         .unwrap();
 
@@ -178,20 +175,20 @@ mod tests {
 
         local
             .run_until(async move {
-                let mut monitor = Monitor::start(bsec, MockPersistState::default(), time.clone())
+                let mut monitor = Monitor::start(bsec, MockPersistState::default(), clock.clone())
                     .await
                     .unwrap();
                 {
                     let outputs = monitor.current.borrow();
                     assert_eq!(outputs.len(), 1);
-                    assert_eq!(outputs[0].sensor, VirtualSensorOutput::RawTemperature);
+                    assert_eq!(outputs[0].sensor, bsec::OutputKind::RawTemperature);
                     assert!((outputs[0].signal - 22.) < f64::EPSILON);
                 }
 
                 let _ = monitor.current.changed().await.and_then(|_| {
                     let outputs = monitor.current.borrow();
                     assert_eq!(outputs.len(), 1);
-                    assert_eq!(outputs[0].sensor, VirtualSensorOutput::RawTemperature);
+                    assert_eq!(outputs[0].sensor, bsec::OutputKind::RawTemperature);
                     assert!((outputs[0].signal - 22.) < f64::EPSILON);
                     Ok(())
                 });
@@ -204,8 +201,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn loads_and_persists_state() {
-        let time = Arc::new(FakeTime::default());
-        let bsec = create_minimal_subscribed_bsec(time.clone());
+        let clock = Arc::new(FakeClock::new());
+        let bsec = create_minimal_subscribed_bsec(clock.clone());
 
         let state = Arc::new(RefCell::new(Some(bsec.get_state().unwrap())));
         let persist_state = MockPersistState {
@@ -216,7 +213,7 @@ mod tests {
 
         local
             .run_until(async move {
-                let monitor = Monitor::start(bsec, persist_state, time.clone())
+                let monitor = Monitor::start(bsec, persist_state, clock.clone())
                     .await
                     .unwrap();
                 *state.borrow_mut() = None;
@@ -229,8 +226,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn autosaves_state() {
-        let time = Arc::new(FakeTime::default());
-        let bsec = create_minimal_subscribed_bsec(time.clone());
+        let clock = Arc::new(FakeClock::new());
+        let bsec = create_minimal_subscribed_bsec(clock.clone());
 
         let state = Arc::new(RefCell::new(None));
         let persist_state = MockPersistState {
@@ -241,12 +238,12 @@ mod tests {
 
         local
             .run_until(async move {
-                let monitor = Monitor::start(bsec, persist_state, time.clone())
+                let monitor = Monitor::start(bsec, persist_state, clock.clone())
                     .await
                     .unwrap();
 
                 for _ in 0..70 {
-                    time.sleep(Duration::from_secs(1)).await;
+                    clock.sleep(Duration::from_secs(1)).await;
                     tokio::task::yield_now().await
                 }
 

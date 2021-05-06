@@ -52,11 +52,12 @@ impl<P: AsRef<Path>> PersistState for StateFile<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env::temp_dir;
+    use tempfile::tempdir;
 
     #[test]
     fn test_state_file_roundtrips() {
-        let path = temp_dir().join("state_file");
+        let tmp_dir = tempdir().unwrap();
+        let path = tmp_dir.path().join("state_file");
 
         let mut state_file = StateFile::new(path);
         assert_eq!(state_file.load_state().unwrap(), None);
