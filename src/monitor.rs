@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bsec::{self, bme::BmeSensor, clock::Clock, Bsec, Output};
+use bsec::{self, bme::BmeSensor, clock::Clock, Bsec};
 use nb::block;
 use std::future::Future;
 use std::sync::Arc;
@@ -9,37 +9,39 @@ use tokio::time::Duration;
 
 pub trait PersistState {
     type Error;
+
     fn load_state(&mut self) -> Result<Option<Vec<u8>>, Self::Error>;
     fn save_state(&mut self, state: &[u8]) -> Result<(), Self::Error>;
 }
 
 pub trait Sleep {
     type SleepFuture: Future;
+
     fn sleep(&self, duration: Duration) -> Self::SleepFuture;
 }
 
-pub struct Monitor<S, P, T>
+pub struct Monitor<S, P, C>
 where
     S: BmeSensor + 'static,
     P: PersistState + 'static,
-    T: Clock + Sleep + 'static,
+    C: Clock + Sleep + 'static,
     P::Error: std::error::Error + Send + Sync + 'static,
     S::Error: std::fmt::Debug + Send + Sync + 'static,
 {
-    pub current: watch::Receiver<Vec<Output>>,
+    pub current: watch::Receiver<Vec<bsec::Output>>,
     pub request_shutdown: oneshot::Sender<()>,
-    pub join_handle: JoinHandle<Result<(Bsec<S, T, Arc<T>>, P)>>,
+    pub join_handle: JoinHandle<Result<(Bsec<S, C, Arc<C>>, P)>>,
 }
 
-impl<S, P, T> Monitor<S, P, T>
+impl<S, P, C> Monitor<S, P, C>
 where
     S: BmeSensor + 'static,
     P: PersistState + 'static,
-    T: Clock + Sleep + 'static,
+    C: Clock + Sleep + 'static,
     P::Error: std::error::Error + Send + Sync + 'static,
     S::Error: std::fmt::Debug + Send + Sync + 'static,
 {
-    pub async fn start(bsec: Bsec<S, T, Arc<T>>, persistence: P, time: Arc<T>) -> Result<Self> {
+    pub async fn start(bsec: Bsec<S, C, Arc<C>>, persistence: P, time: Arc<C>) -> Result<Self> {
         let mut bsec = bsec;
         let (set_current, current) =
             watch::channel(Self::next_measurement(&mut bsec, time.clone()).await?);
@@ -59,12 +61,12 @@ where
     }
 
     async fn monitoring_loop(
-        bsec: Bsec<S, T, Arc<T>>,
+        bsec: Bsec<S, C, Arc<C>>,
         persistence: P,
-        time: Arc<T>,
-        set_current: watch::Sender<Vec<Output>>,
+        time: Arc<C>,
+        set_current: watch::Sender<Vec<bsec::Output>>,
         shutdown_requested: oneshot::Receiver<()>,
-    ) -> Result<(Bsec<S, T, Arc<T>>, P)> {
+    ) -> Result<(Bsec<S, C, Arc<C>>, P)> {
         let mut bsec = bsec;
         let mut persistence = persistence;
         let mut shutdown_requested = shutdown_requested;
@@ -89,9 +91,9 @@ where
     }
 
     async fn next_measurement(
-        bsec: &mut Bsec<S, T, Arc<T>>,
-        time: Arc<T>,
-    ) -> Result<Vec<Output>, bsec::error::Error<S::Error>> {
+        bsec: &mut Bsec<S, C, Arc<C>>,
+        time: Arc<C>,
+    ) -> Result<Vec<bsec::Output>, bsec::error::Error<S::Error>> {
         let sleep_duration = bsec.next_measurement() - time.timestamp_ns();
         if sleep_duration > 0 {
             time.sleep(Duration::from_nanos(sleep_duration as u64))
@@ -102,7 +104,7 @@ where
         block!(bsec.process_last_measurement())
     }
 
-    async fn stop(self) -> Result<(Bsec<S, T, Arc<T>>, P), anyhow::Error> {
+    async fn stop(self) -> Result<(Bsec<S, C, Arc<C>>, P), anyhow::Error> {
         let _ = self.request_shutdown.send(());
         self.join_handle.await?
     }
