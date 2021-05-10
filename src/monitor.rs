@@ -4,7 +4,6 @@ use nb::block;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
-use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 pub trait PersistState {
@@ -20,20 +19,25 @@ pub trait Sleep {
     fn sleep(&self, duration: Duration) -> Self::SleepFuture;
 }
 
-pub struct Monitor<S, P, C>
-where
-    S: BmeSensor + 'static,
-    P: PersistState + 'static,
-    C: Clock + Sleep + 'static,
-    P::Error: std::error::Error + Send + Sync + 'static,
-    S::Error: std::fmt::Debug + Send + Sync + 'static,
-{
-    pub current: watch::Receiver<Vec<bsec::Output>>,
-    pub request_shutdown: oneshot::Sender<()>,
-    pub join_handle: JoinHandle<Result<(Bsec<S, C, Arc<C>>, P)>>,
+pub struct BsecReceiver {
+    pub current: watch::Receiver<Option<Vec<bsec::Output>>>,
+    pub initiate_shutdown: oneshot::Sender<()>,
 }
 
-impl<S, P, C> Monitor<S, P, C>
+pub struct BsecSender<S, P, C>
+where
+    S: BmeSensor + 'static,
+    P: PersistState + 'static,
+    C: Clock + Sleep + 'static,
+{
+    sender: watch::Sender<Option<Vec<bsec::Output>>>,
+    shutdown_request_receiver: oneshot::Receiver<()>,
+    bsec: Bsec<S, C, Arc<C>>,
+    persistence: P,
+    clock: Arc<C>,
+}
+
+impl<S, P, C> BsecSender<S, P, C>
 where
     S: BmeSensor + 'static,
     P: PersistState + 'static,
@@ -41,53 +45,27 @@ where
     P::Error: std::error::Error + Send + Sync + 'static,
     S::Error: std::fmt::Debug + Send + Sync + 'static,
 {
-    pub async fn start(bsec: Bsec<S, C, Arc<C>>, persistence: P, time: Arc<C>) -> Result<Self> {
-        let mut bsec = bsec;
-        let (set_current, current) =
-            watch::channel(Self::next_measurement(&mut bsec, time.clone()).await?);
-        let (request_shutdown, shutdown_requested) = oneshot::channel();
-        let join_handle = tokio::task::spawn_local(Self::monitoring_loop(
-            bsec,
-            persistence,
-            time,
-            set_current,
-            shutdown_requested,
-        ));
-        Ok(Self {
-            current,
-            request_shutdown,
-            join_handle,
-        })
-    }
+    pub async fn monitoring_loop(mut self) -> Result<(Bsec<S, C, Arc<C>>, P)> {
+        let mut last_state_save = self.clock.timestamp_ns();
 
-    async fn monitoring_loop(
-        bsec: Bsec<S, C, Arc<C>>,
-        persistence: P,
-        time: Arc<C>,
-        set_current: watch::Sender<Vec<bsec::Output>>,
-        shutdown_requested: oneshot::Receiver<()>,
-    ) -> Result<(Bsec<S, C, Arc<C>>, P)> {
-        let mut bsec = bsec;
-        let mut persistence = persistence;
-        let mut shutdown_requested = shutdown_requested;
-        let mut last_state_save = time.timestamp_ns();
-
-        if let Some(state) = persistence.load_state()? {
-            bsec.set_state(&state)?;
+        if let Some(state) = self.persistence.load_state()? {
+            self.bsec.set_state(&state)?;
         }
 
-        while shutdown_requested.try_recv().is_err() {
-            set_current.send(Self::next_measurement(&mut bsec, time.clone()).await?)?;
-            if time.timestamp_ns() - last_state_save >= 60_000_000_000 {
-                last_state_save = time.timestamp_ns();
-                persistence.save_state(&bsec.get_state()?)?;
+        while self.shutdown_request_receiver.try_recv().is_err() {
+            self.sender.send(Some(
+                Self::next_measurement(&mut self.bsec, self.clock.clone()).await?,
+            ))?;
+            if self.clock.timestamp_ns() - last_state_save >= 60_000_000_000 {
+                last_state_save = self.clock.timestamp_ns();
+                self.persistence.save_state(&self.bsec.get_state()?)?;
             }
             tokio::task::yield_now().await;
         }
 
-        persistence.save_state(&bsec.get_state()?)?;
+        self.persistence.save_state(&self.bsec.get_state()?)?;
 
-        Ok((bsec, persistence))
+        Ok((self.bsec, self.persistence))
     }
 
     async fn next_measurement(
@@ -103,11 +81,35 @@ where
         time.sleep(duration).await;
         block!(bsec.process_last_measurement())
     }
+}
 
-    async fn stop(self) -> Result<(Bsec<S, C, Arc<C>>, P), anyhow::Error> {
-        let _ = self.request_shutdown.send(());
-        self.join_handle.await?
-    }
+pub fn bsec_monitor<S, P, C>(
+    bsec: Bsec<S, C, Arc<C>>,
+    persistence: P,
+    clock: Arc<C>,
+) -> (BsecSender<S, P, C>, BsecReceiver)
+where
+    S: BmeSensor + 'static,
+    P: PersistState + 'static,
+    C: Clock + Sleep + 'static,
+    P::Error: std::error::Error + Send + Sync + 'static,
+    S::Error: std::fmt::Debug + Send + Sync + 'static,
+{
+    let (sender, receiver) = watch::channel(None);
+    let (initiate_shutdown, shutdown_request_receiver) = oneshot::channel();
+    (
+        BsecSender {
+            sender,
+            shutdown_request_receiver,
+            bsec,
+            persistence,
+            clock,
+        },
+        BsecReceiver {
+            current: receiver,
+            initiate_shutdown,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -116,11 +118,11 @@ mod tests {
     use bsec::bme::test_support::FakeBmeSensor;
     use bsec::clock::test_support::FakeClock;
     use serial_test::serial;
-    use std::cell::RefCell;
     use std::future::{self, Ready};
 
     impl Sleep for FakeClock {
         type SleepFuture = Ready<()>;
+
         fn sleep(&self, duration: Duration) -> Self::SleepFuture {
             self.advance_by(duration);
             future::ready(())
@@ -129,17 +131,18 @@ mod tests {
 
     #[derive(Default)]
     struct MockPersistState {
-        pub state: Arc<RefCell<Option<Vec<u8>>>>,
+        pub state: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
     }
+
     impl PersistState for MockPersistState {
         type Error = std::convert::Infallible;
 
         fn load_state(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
-            Ok(self.state.borrow().clone())
+            Ok(self.state.read().unwrap().clone())
         }
 
         fn save_state(&mut self, state: &[u8]) -> Result<(), Self::Error> {
-            *self.state.borrow_mut() = Some(Vec::from(state));
+            *self.state.write().unwrap() = Some(Vec::from(state));
             Ok(())
         }
     }
@@ -173,31 +176,24 @@ mod tests {
         }])
         .unwrap();
 
-        let local = tokio::task::LocalSet::new();
+        let (monitor, mut rx) =
+            bsec_monitor(bsec, MockPersistState::default(), clock.clone());
+        {
+            assert_eq!(*rx.current.borrow(), None);
+        }
 
-        local
-            .run_until(async move {
-                let mut monitor = Monitor::start(bsec, MockPersistState::default(), clock.clone())
-                    .await
-                    .unwrap();
-                {
-                    let outputs = monitor.current.borrow();
-                    assert_eq!(outputs.len(), 1);
-                    assert_eq!(outputs[0].sensor, bsec::OutputKind::RawTemperature);
-                    assert!((outputs[0].signal - 22.) < f64::EPSILON);
-                }
+        let join_handle = tokio::task::spawn(monitor.monitoring_loop());
+        let _ = rx.current.changed().await.and_then(|_| {
+            let borrow = rx.current.borrow();
+            let outputs = borrow.as_deref().unwrap();
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].sensor, bsec::OutputKind::RawTemperature);
+            assert!((outputs[0].signal - 22.) < f64::EPSILON);
+            Ok(())
+        });
 
-                let _ = monitor.current.changed().await.and_then(|_| {
-                    let outputs = monitor.current.borrow();
-                    assert_eq!(outputs.len(), 1);
-                    assert_eq!(outputs[0].sensor, bsec::OutputKind::RawTemperature);
-                    assert!((outputs[0].signal - 22.) < f64::EPSILON);
-                    Ok(())
-                });
-
-                monitor.stop().await.unwrap();
-            })
-            .await;
+        rx.initiate_shutdown.send(()).unwrap();
+        join_handle.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -206,23 +202,15 @@ mod tests {
         let clock = Arc::new(FakeClock::new());
         let bsec = create_minimal_subscribed_bsec(clock.clone());
 
-        let state = Arc::new(RefCell::new(Some(bsec.get_state().unwrap())));
-        let persist_state = MockPersistState {
-            state: state.clone(),
-        };
+        let state = Arc::new(std::sync::RwLock::new(Some(bsec.get_state().unwrap())));
+        let persist_state = MockPersistState { state: state.clone() };
 
-        let local = tokio::task::LocalSet::new();
-
-        local
-            .run_until(async move {
-                let monitor = Monitor::start(bsec, persist_state, clock.clone())
-                    .await
-                    .unwrap();
-                *state.borrow_mut() = None;
-                let (bsec, _) = monitor.stop().await.unwrap();
-                assert_eq!(*state.borrow(), Some(bsec.get_state().unwrap()));
-            })
-            .await;
+        let (monitor, rx) = bsec_monitor(bsec, persist_state, clock.clone());
+        let join_handle = tokio::task::spawn(monitor.monitoring_loop());
+        *state.write().unwrap() = None;
+        rx.initiate_shutdown.send(()).unwrap();
+        let (bsec, _) = join_handle.await.unwrap().unwrap();
+        assert_eq!(*state.read().unwrap(), Some(bsec.get_state().unwrap()));
     }
 
     #[tokio::test]
@@ -231,27 +219,19 @@ mod tests {
         let clock = Arc::new(FakeClock::new());
         let bsec = create_minimal_subscribed_bsec(clock.clone());
 
-        let state = Arc::new(RefCell::new(None));
-        let persist_state = MockPersistState {
-            state: state.clone(),
-        };
+        let state = Arc::new(std::sync::RwLock::new(None));
+        let persist_state = MockPersistState { state: state.clone() };
 
-        let local = tokio::task::LocalSet::new();
+        let (monitor, rx) = bsec_monitor(bsec, persist_state, clock.clone());
+        let join_handle = tokio::task::spawn(monitor.monitoring_loop());
 
-        local
-            .run_until(async move {
-                let monitor = Monitor::start(bsec, persist_state, clock.clone())
-                    .await
-                    .unwrap();
+        for _ in 0..70 {
+            clock.sleep(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await
+        }
 
-                for _ in 0..70 {
-                    clock.sleep(Duration::from_secs(1)).await;
-                    tokio::task::yield_now().await
-                }
-
-                assert!(state.borrow().is_some());
-                monitor.stop().await.unwrap();
-            })
-            .await;
+        assert!(state.read().unwrap().is_some());
+        rx.initiate_shutdown.send(()).unwrap();
+        join_handle.await.unwrap().unwrap();
     }
 }

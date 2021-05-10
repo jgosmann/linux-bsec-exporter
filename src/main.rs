@@ -11,7 +11,7 @@ use tokio::signal::unix::{signal, SignalKind};
 
 use bsec::bme::bme680::Bme680Sensor;
 use bsec::clock::TimePassed;
-use linux_bsec_exporter::monitor::Monitor;
+use linux_bsec_exporter::monitor::bsec_monitor;
 use linux_bsec_exporter::persistance::StateFile;
 
 #[macro_use]
@@ -215,25 +215,26 @@ async fn run_monitoring(
     bsec: bsec::Bsec<Dev, TimePassed, Arc<TimePassed>>,
     registry: BsecGaugeRegistry,
 ) -> anyhow::Result<()> {
-    let mut monitor = Monitor::start(
+    let (monitor, mut rx) = bsec_monitor(
         bsec,
         StateFile::new("/var/lib/bsec-metrics-exporter/state.bin"),
         TIME.clone(),
-    )
-    .await?;
+    );
+    let join_handle = tokio::task::spawn(monitor.monitoring_loop());
 
-    tokio::task::spawn_local(handle_sigterm(monitor.request_shutdown));
+    tokio::task::spawn(handle_sigterm(rx.initiate_shutdown));
 
     println!("BSEC monitoring started.");
-    while let Ok(_) = monitor.current.changed().await {
-        let outputs = monitor.current.borrow();
-        for output in outputs.iter() {
-            registry.set(output);
+    while let Ok(_) = rx.current.changed().await {
+        if let Some(outputs) = rx.current.borrow().as_deref() {
+            for output in outputs.iter() {
+                registry.set(output);
+            }
         }
     }
 
     println!("Waiting for BSEC monitoring shutdown ...");
-    monitor.join_handle.await??;
+    join_handle.await??;
     println!("BSEC monitoring shutdown complete.");
     Ok(())
 }
@@ -258,15 +259,15 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         })
         .collect();
     bsec.update_subscription(&conf)?;
-    let local = tokio::task::LocalSet::new();
     let registry = BsecGaugeRegistry::new(&ACTIVE_SENSORS)?;
 
-    let _monitoring = local.run_until(run_monitoring(bsec, registry.clone()));
+    let join_handle = tokio::task::spawn(run_monitoring(bsec, registry.clone()));
 
     let mut app = tide::with_state(registry);
     app.at("/metrics").get(serve_metrics);
     println!("Spawning server ...");
     app.listen("0.0.0.0:9118").await?;
+    join_handle.await??;
     println!("Shutdown.");
 
     Ok(())
