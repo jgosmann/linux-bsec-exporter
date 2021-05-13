@@ -21,4 +21,5 @@ tokio = { version = "1.1.0", features = ["macros", "sync", "rt", "signal", "time
 [dev-dependencies]
 serial_test = "0.5.1"
 bsec = { version = "0.2.0", features = ["use-bme680", "test-support"] }
+protobuf = "2.23.0"
 tempfile = "3.2.0"
