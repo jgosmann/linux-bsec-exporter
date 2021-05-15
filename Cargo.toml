@@ -13,6 +13,7 @@ bme680 = "0.5.1"
 bsec = {version = "0.3.0", features = ["use-bme680"]}
 embedded-hal = "0.2.5"
 lazy_static = "1.4.0"
+libsystemd = "0.2.1"
 linux-embedded-hal = "0.3.0"
 nb = "1.0.0"
 prometheus = "0.11.0"

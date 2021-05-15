@@ -1,4 +1,5 @@
 use embedded_hal::blocking::i2c;
+use libsystemd::daemon::{self, NotifyState};
 use linux_embedded_hal::{Delay, I2cdev};
 use prometheus::Encoder;
 use std::error::Error;
@@ -120,7 +121,14 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let mut app = tide::with_state(registry);
     app.at("/metrics").get(serve_metrics);
     println!("Spawning server ...");
-    app.listen(config.exporter.listen_addrs).await?;
+    let app_future = app.listen(config.exporter.listen_addrs);
+
+    println!("Ready.");
+    if daemon::booted() {
+        daemon::notify(true, &[NotifyState::Ready])?;
+    }
+
+    app_future.await?;
     join_handle.await??;
     println!("Shutdown.");
 
