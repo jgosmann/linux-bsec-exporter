@@ -1,3 +1,4 @@
+use embedded_hal::blocking::i2c;
 use linux_embedded_hal::{Delay, I2cdev};
 use prometheus::Encoder;
 use std::error::Error;
@@ -69,6 +70,17 @@ where
     Ok(())
 }
 
+#[derive(Debug)]
+struct Bme680Error(bme680::Error<<I2cdev as i2c::Read>::Error, <I2cdev as i2c::Write>::Error>);
+
+impl std::fmt::Display for Bme680Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{:?}", self))
+    }
+}
+
+impl std::error::Error for Bme680Error {}
+
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     let config: linux_bsec_exporter::config::Config =
@@ -76,7 +88,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Initializing sensor ...");
     let i2c = I2cdev::new(config.sensor.device)?;
-    let dev = bme680::Bme680::init(i2c, Delay {}, config.sensor.address).unwrap(); // FIXME error handling
+    let dev = bme680::Bme680::init(i2c, Delay {}, config.sensor.address).map_err(Bme680Error)?;
     let sensor = bsec::bme::bme680::Bme680SensorBuilder::new(dev)
         .initial_ambient_temp_celsius(config.sensor.initial_ambient_temp_celsius)
         .temp_offset_celsius(config.bsec.temperature_offset_celsius)

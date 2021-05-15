@@ -1093,6 +1093,7 @@ dependencies = [
  "anyhow",
  "bme680",
  "bsec",
+ "embedded-hal",
  "lazy_static",
  "linux-embedded-hal",
  "nb 1.0.0",

@@ -1,27 +1,28 @@
 [package]
-name = "linux-bsec-exporter"
-description = "Export Bosch BSEC outputs to Prometheus."
-version = "0.1.0"
 authors = ["Jan Gosmann <jan@hyper-world.de>"]
+description = "Export Bosch BSEC outputs to Prometheus."
 edition = "2018"
+name = "linux-bsec-exporter"
+version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.38"
 bme680 = "0.5.1"
-bsec = { version = "0.3.0", features = ["use-bme680"] }
+bsec = {version = "0.3.0", features = ["use-bme680"]}
+embedded-hal = "0.2.5"
 lazy_static = "1.4.0"
 linux-embedded-hal = "0.3.0"
 nb = "1.0.0"
 prometheus = "0.11.0"
-serde = { version = "1.0", features = ["derive"] }
+serde = {version = "1.0", features = ["derive"]}
 tide = "0.16.0"
-tokio = { version = "1.1.0", features = ["macros", "sync", "rt", "signal", "time"] }
+tokio = {version = "1.1.0", features = ["macros", "sync", "rt", "signal", "time"]}
 toml = "0.5.8"
 
 [dev-dependencies]
-serial_test = "0.5.1"
-bsec = { version = "0.3.0", features = ["use-bme680", "test-support"] }
+bsec = {version = "0.3.0", features = ["use-bme680", "test-support"]}
 protobuf = "2.23.0"
+serial_test = "0.5.1"
 tempfile = "3.2.0"
