@@ -84,8 +84,9 @@ impl std::error::Error for Bme680Error {}
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
-    let config: linux_bsec_exporter::config::Config =
-        toml::from_str(&fs::read_to_string("/etc/linux-bsec-exporter/config.toml")?)?;
+    let config: linux_bsec_exporter::config::Config = toml::from_str(&fs::read_to_string(
+        std::env::var("BSEC_CONFIG_PATH").unwrap_or("/etc/linux-bsec-exporter/config.toml".into()),
+    )?)?;
 
     println!("Initializing sensor ...");
     let i2c = I2cdev::new(config.sensor.device)?;
