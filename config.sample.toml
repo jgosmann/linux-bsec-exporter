@@ -1,5 +1,4 @@
 # Sample linux-bsec-exporter configuration file.
-# Provided values are the defaults.
 #
 # By default the configuration file is read from
 # /etc/linux-bsec-exporter/config.toml
@@ -8,22 +7,25 @@
 [sensor]
 # Path to the I2C device.
 device = "/dev/i2c-1"
-# Sensor address, one of: primary, secondary.
+# Sensor address, one of: primary, secondary. (default: primary)
 address = "primary"
 # Ambient temperature assumed for the very first measurement cycle after
-# startup.
+# startup. (default: 20)
 initial_ambient_temp_celsius = 20
 
 # BSEC settings
 [bsec]
 # Path to the BSEC configuration to load. This should be one of the (binary)
 # files provided with your BSEC distribution.
+# (default: /etc/linux-bsec-exporter/bsec.conf)
 config = "/etc/linux-bsec-exporter/bsec.conf"
 # Temperature offset of the sensor to ambient temperature which will be used
 # as the "heat source" input to the BSEC algorithm to correct for heat sources
 # close to the sensor.
+# (default: 0)
 temperature_offset_celsius = 0.0
-#
+# File to persist the BSEC state in.
+# (default: /var/lib/linux-bsec-exporter/bsec-state.bin)
 state_file = "/var/lib/linux-bsec-exporter/bsec-state.bin"
 
 # BSEC subscriptions
@@ -31,6 +33,8 @@ state_file = "/var/lib/linux-bsec-exporter/bsec-state.bin"
 # Each subscription consists out of the virtual sensor/BSEC output subscribing
 # to and the sample rate. Sample rate must be one of the strings: disabled,
 # ulp, lp, continuous. Refer to your BSEC documentation for more details.
+#
+# By default all outputs ars subscribed to with the "lp" sampling rate.
 [bsec.subscriptions]
 breath_voc_equivalent = "lp"
 co2_equivalent = "lp"
@@ -49,5 +53,5 @@ static_iaq = "lp"
 
 # Prometheus exporter settings
 [exporter]
-# Network addresses to listen on.
+# Network addresses to listen on. (default: ["localhost:3953"])
 listen_addrs = ["localhost:3953"]
