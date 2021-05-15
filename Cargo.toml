@@ -2,6 +2,7 @@
 authors = ["Jan Gosmann <jan@hyper-world.de>"]
 description = "Export Bosch BSEC outputs to Prometheus."
 edition = "2018"
+license = "MIT OR Apache-2.0"
 name = "linux-bsec-exporter"
 version = "0.1.0"
 
