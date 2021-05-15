@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fs::{self, File};
 use std::io::Read;
 use std::sync::Arc;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use bsec::clock::TimePassed;
 use bsec::{bme::bme680::Bme680Sensor, OutputKind};
@@ -25,10 +25,17 @@ async fn serve_metrics(req: tide::Request<BsecGaugeRegistry>) -> tide::Result {
     Ok(format!("{}", String::from_utf8(buffer)?).into())
 }
 
-async fn handle_sigterm(request_shutdown: tokio::sync::oneshot::Sender<()>) -> std::io::Result<()> {
-    signal(SignalKind::terminate())?.recv().await;
-    let _ = request_shutdown.send(());
-    Ok(())
+struct SigTermHandler(Signal);
+
+impl SigTermHandler {
+    pub fn new() -> std::io::Result<Self> {
+        Ok(Self(signal(SignalKind::terminate())?))
+    }
+
+    pub async fn dispatch_to(mut self, sender: tokio::sync::oneshot::Sender<()>) {
+        self.0.recv().await;
+        let _ = sender.send(());
+    }
 }
 
 type Dev = Bme680Sensor<linux_embedded_hal::I2cdev, linux_embedded_hal::Delay>;
@@ -42,9 +49,9 @@ async fn run_monitoring(
         StateFile::new("/var/lib/bsec-metrics-exporter/state.bin"), // FIXME take from config
         TIME.clone(),
     );
-    let join_handle = tokio::task::spawn(monitor.monitoring_loop());
 
-    tokio::task::spawn(handle_sigterm(rx.initiate_shutdown));
+    tokio::task::spawn(SigTermHandler::new()?.dispatch_to(rx.initiate_shutdown));
+    let join_handle = tokio::task::spawn(monitor.monitoring_loop());
 
     println!("BSEC monitoring started.");
     while let Ok(_) = rx.current.changed().await {
