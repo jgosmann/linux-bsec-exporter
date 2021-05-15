@@ -8,8 +8,8 @@ use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use bsec::clock::TimePassed;
 use bsec::{bme::bme680::Bme680Sensor, OutputKind};
-use linux_bsec_exporter::persistance::StateFile;
 use linux_bsec_exporter::{metrics::BsecGaugeRegistry, monitor::bsec_monitor};
+use linux_bsec_exporter::{monitor::PersistState, persistance::StateFile};
 
 #[macro_use]
 extern crate lazy_static;
@@ -38,17 +38,18 @@ impl SigTermHandler {
     }
 }
 
-type Dev = Bme680Sensor<linux_embedded_hal::I2cdev, linux_embedded_hal::Delay>;
+type SensorDevice = Bme680Sensor<linux_embedded_hal::I2cdev, linux_embedded_hal::Delay>;
 
-async fn run_monitoring(
-    bsec: bsec::Bsec<Dev, TimePassed, Arc<TimePassed>>,
+async fn run_monitoring<P>(
+    bsec: bsec::Bsec<SensorDevice, TimePassed, Arc<TimePassed>>,
+    persistence: P,
     registry: BsecGaugeRegistry,
-) -> anyhow::Result<()> {
-    let (monitor, mut rx) = bsec_monitor(
-        bsec,
-        StateFile::new("/var/lib/bsec-metrics-exporter/state.bin"), // FIXME take from config
-        TIME.clone(),
-    );
+) -> anyhow::Result<()>
+where
+    P: PersistState + Send + Sync + 'static,
+    P::Error: std::error::Error + Send + Sync + 'static,
+{
+    let (monitor, mut rx) = bsec_monitor(bsec, persistence, TIME.clone());
 
     tokio::task::spawn(SigTermHandler::new()?.dispatch_to(rx.initiate_shutdown));
     let join_handle = tokio::task::spawn(monitor.monitoring_loop());
@@ -98,7 +99,11 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Vec<OutputKind>>(),
     )?;
 
-    let join_handle = tokio::task::spawn(run_monitoring(bsec, registry.clone()));
+    let join_handle = tokio::task::spawn(run_monitoring(
+        bsec,
+        StateFile::new(config.bsec.state_file),
+        registry.clone(),
+    ));
 
     let mut app = tide::with_state(registry);
     app.at("/metrics").get(serve_metrics);
