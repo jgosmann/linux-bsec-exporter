@@ -1,13 +1,13 @@
 use linux_embedded_hal::{Delay, I2cdev};
 use prometheus::Encoder;
 use std::error::Error;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 
-use bsec::bme::bme680::Bme680Sensor;
 use bsec::clock::TimePassed;
+use bsec::{bme::bme680::Bme680Sensor, OutputKind};
 use linux_bsec_exporter::persistance::StateFile;
 use linux_bsec_exporter::{metrics::BsecGaugeRegistry, monitor::bsec_monitor};
 
@@ -17,22 +17,6 @@ extern crate lazy_static;
 lazy_static! {
     static ref TIME: Arc<TimePassed> = Arc::default();
 }
-
-const ACTIVE_SENSORS: [bsec::OutputKind; 13] = [
-    bsec::OutputKind::Iaq,
-    bsec::OutputKind::StaticIaq,
-    bsec::OutputKind::Co2Equivalent,
-    bsec::OutputKind::BreathVocEquivalent,
-    bsec::OutputKind::RawTemperature,
-    bsec::OutputKind::RawPressure,
-    bsec::OutputKind::RawHumidity,
-    bsec::OutputKind::RawGas,
-    bsec::OutputKind::StabilizationStatus,
-    bsec::OutputKind::RunInStatus,
-    bsec::OutputKind::SensorHeatCompensatedTemperature,
-    bsec::OutputKind::SensorHeatCompensatedHumidity,
-    bsec::OutputKind::GasPercentage,
-];
 
 async fn serve_metrics(req: tide::Request<BsecGaugeRegistry>) -> tide::Result {
     let mut buffer = vec![];
@@ -55,7 +39,7 @@ async fn run_monitoring(
 ) -> anyhow::Result<()> {
     let (monitor, mut rx) = bsec_monitor(
         bsec,
-        StateFile::new("/var/lib/bsec-metrics-exporter/state.bin"),
+        StateFile::new("/var/lib/bsec-metrics-exporter/state.bin"), // FIXME take from config
         TIME.clone(),
     );
     let join_handle = tokio::task::spawn(monitor.monitoring_loop());
@@ -79,25 +63,33 @@ async fn run_monitoring(
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Box<dyn Error>> {
-    println!("Acquiring sensor ...");
-    let i2c = I2cdev::new("/dev/i2c-1")?;
-    let dev = bme680::Bme680::init(i2c, Delay {}, bme680::I2CAddress::Secondary).unwrap();
-    let sensor = bsec::bme::bme680::Bme680Sensor::new(dev, 20.);
+    let config: linux_bsec_exporter::config::Config =
+        toml::from_str(&fs::read_to_string("/etc/linux-bsec-exporter/config.toml")?)?;
+
+    println!("Initializing sensor ...");
+    let i2c = I2cdev::new(config.sensor.device)?;
+    let dev = bme680::Bme680::init(i2c, Delay {}, config.sensor.address).unwrap(); // FIXME error handling
+    let sensor = bsec::bme::bme680::Bme680SensorBuilder::new(dev)
+        .initial_ambient_temp_celsius(config.sensor.initial_ambient_temp_celsius)
+        .temp_offset_celsius(config.bsec.temperature_offset_celsius)
+        .build();
     let mut bsec = bsec::Bsec::init(sensor, TIME.clone())?;
-    println!("Setting config ...");
-    let mut config = Vec::<u8>::new();
-    File::open("/etc/bsec-metrics-exporter/bsec_iaq.config")?.read_to_end(&mut config)?;
-    bsec.set_configuration(&config[4..])?; // First four bytes give config length
-    println!("Sensor initialized.");
-    let conf: Vec<_> = ACTIVE_SENSORS
-        .iter()
-        .map(|&sensor| bsec::SubscriptionRequest {
-            sample_rate: bsec::SampleRate::Lp,
-            sensor,
-        })
-        .collect();
-    bsec.update_subscription(&conf)?;
-    let registry = BsecGaugeRegistry::new(&ACTIVE_SENSORS)?;
+
+    println!("Setting BSEC config ...");
+    let mut bsec_config = Vec::<u8>::new();
+    File::open(config.bsec.config)?.read_to_end(&mut bsec_config)?;
+    bsec.set_configuration(&bsec_config[4..])?; // First four bytes give config length
+
+    println!("Subscribing to BSEC outputs ...");
+    bsec.update_subscription(&config.bsec.subscriptions)?;
+    let registry = BsecGaugeRegistry::new(
+        &config
+            .bsec
+            .subscriptions
+            .iter()
+            .map(|item| item.sensor)
+            .collect::<Vec<OutputKind>>(),
+    )?;
 
     let join_handle = tokio::task::spawn(run_monitoring(bsec, registry.clone()));
 

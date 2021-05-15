@@ -1,0 +1,53 @@
+# Sample linux-bsec-exporter configuration file.
+# Provided values are the defaults.
+#
+# By default the configuration file is read from
+# /etc/linux-bsec-exporter/config.toml
+
+# BME-680 sensor settings
+[sensor]
+# Path to the I2C device.
+device = "/dev/i2c-1"
+# Sensor address, one of: primary, secondary.
+address = "primary"
+# Ambient temperature assumed for the very first measurement cycle after
+# startup.
+initial_ambient_temp_celsius = 20
+
+# BSEC settings
+[bsec]
+# Path to the BSEC configuration to load. This should be one of the (binary)
+# files provided with your BSEC distribution.
+config = "/etc/linux-bsec-exporter/bsec.conf"
+# Temperature offset of the sensor to ambient temperature which will be used
+# as the "heat source" input to the BSEC algorithm to correct for heat sources
+# close to the sensor.
+temperature_offset_celsius = 0.0
+#
+state_file = "/var/lib/linux-bsec-exporter/bsec-state.bin"
+
+# BSEC subscriptions
+#
+# Each subscription consists out of the virtual sensor/BSEC output subscribing
+# to and the sample rate. Sample rate must be one of the strings: disabled,
+# ulp, lp, continuous. Refer to your BSEC documentation for more details.
+[bsec.subscriptions]
+breath_voc_equivalent = "lp"
+co2_equivalent = "lp"
+debug_compensated_gas = "lp"
+gas_percentage = "lp"
+iaq = "lp"
+raw_gas = "lp"
+raw_humidity = "lp"
+raw_pressure = "lp"
+raw_temperature = "lp"
+run_in_status = "lp"
+sensor_heat_compensated_humidity = "lp"
+sensor_heat_compensated_temperature = "lp"
+stabilization_status = "lp"
+static_iaq = "lp"
+
+# Prometheus exporter settings
+[exporter]
+# Network addresses to listen on.
+listen_addrs = ["localhost:3953"]
