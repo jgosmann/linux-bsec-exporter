@@ -1,9 +1,13 @@
 [package]
 authors = ["Jan Gosmann <jan@hyper-world.de>"]
+categories = ["embedded"]
 description = "Export Bosch BSEC outputs to Prometheus."
 edition = "2018"
+keywords = ["bsec", "prometheus"]
 license = "MIT OR Apache-2.0"
 name = "linux-bsec-exporter"
+readme = "README.md"
+repository = "https://github.com/jgosmann/linux-bsec-exporter"
 version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
