@@ -1,0 +1,34 @@
+---
+- name: Provide bsec user and group
+  block:
+    - group:
+        name: bsec
+        system: yes
+    - user:
+        name: bsec
+        system: yes
+        group: bsec
+        groups: [i2c]
+
+- name: Ensure path for state files exists and is writable
+  file:
+    path: /var/lib/linux-bsec-exporter
+    owner: bsec
+    group: bsec
+    mode: "0755"
+    state: directory
+
+- name: Install systemd service
+  template:
+    src: linux-bsec-exporter.service
+    dest: /etc/systemd/system/linux-bsec-exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Activate systemd service
+  systemd:
+    name: linux-bsec-exporter.service
+    daemon_reload: yes
+    enabled: yes
+    state: restarted

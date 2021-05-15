@@ -1,0 +1,4 @@
+---
+
+binary_path: linux-bsec-exporter
+config_path: /etc/linux-bsec-exporter/config.toml

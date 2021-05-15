@@ -1,0 +1,16 @@
+[Unit]
+Description=BSEC Prometheus exporter
+
+[Service]
+Type=notify
+ExecStart={{ binary_path }}
+Environment="BSEC_EXPORTER_CONFIG_PATH={{ config_path }}"
+Restart=on-failure
+User=bsec
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
