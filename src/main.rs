@@ -108,7 +108,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     let mut app = tide::with_state(registry);
     app.at("/metrics").get(serve_metrics);
     println!("Spawning server ...");
-    app.listen("0.0.0.0:9118").await?;
+    app.listen(config.exporter.listen_addrs).await?;
     join_handle.await??;
     println!("Shutdown.");
 
