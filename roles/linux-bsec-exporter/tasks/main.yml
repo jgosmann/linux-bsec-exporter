@@ -20,7 +20,7 @@
 
 - name: Install systemd service
   template:
-    src: linux-bsec-exporter.service
+    src: linux-bsec-exporter.service.j2
     dest: /etc/systemd/system/linux-bsec-exporter.service
     owner: root
     group: root
