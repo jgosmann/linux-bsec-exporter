@@ -176,8 +176,7 @@ mod tests {
         }])
         .unwrap();
 
-        let (monitor, mut rx) =
-            bsec_monitor(bsec, MockPersistState::default(), clock.clone());
+        let (monitor, mut rx) = bsec_monitor(bsec, MockPersistState::default(), clock.clone());
         {
             assert_eq!(*rx.current.borrow(), None);
         }
@@ -203,7 +202,9 @@ mod tests {
         let bsec = create_minimal_subscribed_bsec(clock.clone());
 
         let state = Arc::new(std::sync::RwLock::new(Some(bsec.get_state().unwrap())));
-        let persist_state = MockPersistState { state: state.clone() };
+        let persist_state = MockPersistState {
+            state: state.clone(),
+        };
 
         let (monitor, rx) = bsec_monitor(bsec, persist_state, clock.clone());
         let join_handle = tokio::task::spawn(monitor.monitoring_loop());
@@ -220,7 +221,9 @@ mod tests {
         let bsec = create_minimal_subscribed_bsec(clock.clone());
 
         let state = Arc::new(std::sync::RwLock::new(None));
-        let persist_state = MockPersistState { state: state.clone() };
+        let persist_state = MockPersistState {
+            state: state.clone(),
+        };
 
         let (monitor, rx) = bsec_monitor(bsec, persist_state, clock.clone());
         let join_handle = tokio::task::spawn(monitor.monitoring_loop());
