@@ -112,25 +112,30 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             .map(|item| item.sensor)
             .collect::<Vec<OutputKind>>(),
     )?;
-
-    let join_handle = tokio::task::spawn(run_monitoring(
+    let monitoring = run_monitoring(
         bsec,
         StateFile::new(config.bsec.state_file),
         registry.clone(),
-    ));
+    );
 
     let mut app = tide::with_state(registry);
     app.at("/metrics").get(serve_metrics);
     println!("Spawning server ...");
-    let app_future = app.listen(config.exporter.listen_addrs);
+    let join_handle = tokio::task::spawn(app.listen(config.exporter.listen_addrs));
 
     println!("Ready.");
     if daemon::booted() {
-        daemon::notify(true, &[NotifyState::Ready])?;
+        daemon::notify(false, &[NotifyState::Ready])?;
     }
 
-    app_future.await?;
-    join_handle.await??;
+    tokio::select! {
+        result = join_handle => result??,
+        result = monitoring => result?,
+    }
+
+    if daemon::booted() {
+        daemon::notify(true, &[NotifyState::Stopping])?;
+    }
     println!("Shutdown.");
 
     Ok(())
