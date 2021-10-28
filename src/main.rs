@@ -10,6 +10,7 @@ use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use bsec::clock::TimePassed;
 use bsec::{bme::bme680::Bme680Sensor, OutputKind};
+use linux_bsec_exporter::middleware::LogErrors;
 use linux_bsec_exporter::{metrics::BsecGaugeRegistry, monitor::bsec_monitor};
 use linux_bsec_exporter::{monitor::PersistState, persistance::StateFile};
 
@@ -119,6 +120,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let mut app = tide::with_state(registry);
+    app.with(LogErrors);
     app.at("/metrics").get(serve_metrics);
     println!("Spawning server ...");
     let join_handle = tokio::task::spawn(app.listen(config.exporter.listen_addrs));
