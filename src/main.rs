@@ -25,7 +25,7 @@ async fn serve_metrics(req: tide::Request<BsecGaugeRegistry>) -> tide::Result {
     let mut buffer = vec![];
     let encoder = prometheus::TextEncoder::new();
     encoder.encode(&req.state().gather(), &mut buffer)?;
-    Ok(format!("{}", String::from_utf8(buffer)?).into())
+    Ok(String::from_utf8(buffer)?.to_string().into())
 }
 
 struct SigTermHandler(Signal);

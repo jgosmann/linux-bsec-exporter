@@ -146,7 +146,7 @@ impl BsecGaugeRegistry {
 
         for sensor in sensors {
             let gauge = BsecGauge::try_from(sensor)?;
-            gauge.register(&mut gauge_registry.registry)?;
+            gauge.register(&gauge_registry.registry)?;
             gauge_registry.sensor_gauge_map.insert(*sensor, gauge);
         }
 
