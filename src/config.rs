@@ -79,7 +79,6 @@ where
         "run_in_status" => Ok(RunInStatus),
         "sensor_heat_compensated_temperature" => Ok(SensorHeatCompensatedTemperature),
         "sensor_heat_compensated_humidity" => Ok(SensorHeatCompensatedHumidity),
-        "debug_compensated_gas" => Ok(DebugCompensatedGas),
         "gas_percentage" => Ok(GasPercentage),
         _ => Err(D::Error::unknown_variant(
             variant,
@@ -134,7 +133,6 @@ fn all_bsec_subscriptions_config() -> Vec<SubscriptionRequest> {
         OutputKind::RunInStatus,
         OutputKind::SensorHeatCompensatedTemperature,
         OutputKind::SensorHeatCompensatedHumidity,
-        OutputKind::DebugCompensatedGas,
         OutputKind::GasPercentage,
     ]
     .iter()
@@ -223,7 +221,6 @@ pub mod tests {
         run_in_status = "ulp"
         sensor_heat_compensated_temperature = "ulp"
         sensor_heat_compensated_humidity = "ulp"
-        debug_compensated_gas = "ulp"
         gas_percentage = "ulp"
 
         [exporter]
@@ -288,7 +285,6 @@ pub mod tests {
             OutputKind::RunInStatus,
             OutputKind::SensorHeatCompensatedTemperature,
             OutputKind::SensorHeatCompensatedHumidity,
-            OutputKind::DebugCompensatedGas,
             OutputKind::GasPercentage,
         ]
         .iter()

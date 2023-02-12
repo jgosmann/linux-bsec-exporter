@@ -91,8 +91,9 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Initializing sensor ...");
     let i2c = I2cdev::new(config.sensor.device)?;
-    let dev = bme680::Bme680::init(i2c, Delay {}, config.sensor.address).map_err(Bme680Error)?;
-    let sensor = bsec::bme::bme680::Bme680SensorBuilder::new(dev)
+    let mut delay = Delay {};
+    let dev = bme680::Bme680::init(i2c, &mut delay, config.sensor.address).map_err(Bme680Error)?;
+    let sensor = bsec::bme::bme680::Bme680SensorBuilder::new(dev, delay)
         .initial_ambient_temp_celsius(config.sensor.initial_ambient_temp_celsius)
         .temp_offset_celsius(config.bsec.temperature_offset_celsius)
         .build();

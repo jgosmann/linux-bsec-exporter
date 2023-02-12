@@ -117,11 +117,6 @@ impl TryFrom<&bsec::OutputKind> for BsecGauge {
                 "Sensor heat compensated humidity",
                 Some(&GaugeUnit::new_with_display("percent", "%")),
             ),
-            DebugCompensatedGas => BsecGauge::new(
-                "debug_compensated_gas",
-                "Reserved internal debug output",
-                None,
-            ),
             GasPercentage => BsecGauge::new(
                 "gas",
                 "Percentage of min and max filtered gas value",
